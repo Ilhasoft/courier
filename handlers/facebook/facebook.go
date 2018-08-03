@@ -183,194 +183,194 @@ type moPayload struct {
 
 // receiveEvent is our HTTP handler function for incoming messages and status updates
 func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request) ([]courier.Event, error) {
-    payload := &moPayload{}
-    err := handlers.DecodeAndValidateJSON(payload, r)
-    if err != nil {
-        return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-    }
+	payload := &moPayload{}
+	err := handlers.DecodeAndValidateJSON(payload, r)
+	if err != nil {
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+	}
 
-    // not a page object? ignore
-    if payload.Object != "page" {
-        return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring non-page request")
-    }
+	// not a page object? ignore
+	if payload.Object != "page" {
+		return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring non-page request")
+	}
 
-    // no entries? ignore this request
-    if len(payload.Entry) == 0 {
-        return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring request, no entries")
-    }
+	// no entries? ignore this request
+	if len(payload.Entry) == 0 {
+		return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring request, no entries")
+	}
 
-    // the list of events we deal with
-    events := make([]courier.Event, 0, 2)
+	// the list of events we deal with
+	events := make([]courier.Event, 0, 2)
 
-    // the list of data we will return in our response
-    data := make([]interface{}, 0, 2)
+	// the list of data we will return in our response
+	data := make([]interface{}, 0, 2)
 
-    // for each entry
-    for _, entry := range payload.Entry {
-        // no entry, ignore
-        if len(entry.Messaging) == 0 {
-            continue
-        }
+	// for each entry
+	for _, entry := range payload.Entry {
+		// no entry, ignore
+		if len(entry.Messaging) == 0 {
+			continue
+		}
 
-        // grab our message, there is always a single one
-        msg := entry.Messaging[0]
+		// grab our message, there is always a single one
+		msg := entry.Messaging[0]
 
-        // ignore this entry if it is to another page
-        if channel.Address() != msg.Recipient.ID {
-            continue
-        }
+		// ignore this entry if it is to another page
+		if channel.Address() != msg.Recipient.ID {
+			continue
+		}
 
-        // create our date from the timestamp (they give us millis, arg is nanos)
-        date := time.Unix(0, msg.Timestamp*1000000).UTC()
+		// create our date from the timestamp (they give us millis, arg is nanos)
+		date := time.Unix(0, msg.Timestamp*1000000).UTC()
 
-        // create our URN
-        urn, err := urns.NewURNFromParts(urns.FacebookScheme, msg.Sender.ID, "")
-        if err != nil {
-            return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-        }
-        if msg.OptIn != nil {
-            // this is an opt in, if we have a user_ref, use that as our URN (this is a checkbox plugin)
-            // TODO:
-            //    We need to deal with the case of them responding and remapping the user_ref in that case:
-            //    https://developers.facebook.com/docs/messenger-platform/discovery/checkbox-plugin
-            //    Right now that we even support this isn't documented and I don't think anybody uses it, so leaving that out.
-            //    (things will still work, we just will have dupe contacts, one with user_ref for the first contact, then with the real id when they reply)
-            if msg.OptIn.UserRef != "" {
-                urn, err = urns.NewURNFromParts(urns.FacebookScheme, urns.FacebookRefPrefix+msg.OptIn.UserRef, "")
-                if err != nil {
-                    return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-                }
-            }
+		// create our URN
+		urn, err := urns.NewFacebookURN(msg.Sender.ID)
+		if err != nil {
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+		}
+		if msg.OptIn != nil {
+			// this is an opt in, if we have a user_ref, use that as our URN (this is a checkbox plugin)
+			// TODO:
+			//    We need to deal with the case of them responding and remapping the user_ref in that case:
+			//    https://developers.facebook.com/docs/messenger-platform/discovery/checkbox-plugin
+			//    Right now that we even support this isn't documented and I don't think anybody uses it, so leaving that out.
+			//    (things will still work, we just will have dupe contacts, one with user_ref for the first contact, then with the real id when they reply)
+			if msg.OptIn.UserRef != "" {
+				urn, err = urns.NewFacebookURN(urns.FacebookRefPrefix + msg.OptIn.UserRef)
+				if err != nil {
+					return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+				}
+			}
 
-            event := h.Backend().NewChannelEvent(channel, courier.Referral, urn).WithOccurredOn(date)
+			event := h.Backend().NewChannelEvent(channel, courier.Referral, urn).WithOccurredOn(date)
 
-            // build our extra
-            extra := map[string]interface{}{
-                referrerIDKey: msg.OptIn.Ref,
-            }
-            event = event.WithExtra(extra)
+			// build our extra
+			extra := map[string]interface{}{
+				referrerIDKey: msg.OptIn.Ref,
+			}
+			event = event.WithExtra(extra)
 
-            err := h.Backend().WriteChannelEvent(ctx, event)
-            if err != nil {
-                return nil, err
-            }
+			err := h.Backend().WriteChannelEvent(ctx, event)
+			if err != nil {
+				return nil, err
+			}
 
-            events = append(events, event)
-            data = append(data, courier.NewEventReceiveData(event))
+			events = append(events, event)
+			data = append(data, courier.NewEventReceiveData(event))
 
-        } else if msg.Postback != nil {
-            // by default postbacks are treated as new conversations, unless we have referral information
-            eventType := courier.NewConversation
-            if msg.Postback.Referral.Ref != "" {
-                eventType = courier.Referral
-            }
-            event := h.Backend().NewChannelEvent(channel, eventType, urn).WithOccurredOn(date)
+		} else if msg.Postback != nil {
+			// by default postbacks are treated as new conversations, unless we have referral information
+			eventType := courier.NewConversation
+			if msg.Postback.Referral.Ref != "" {
+				eventType = courier.Referral
+			}
+			event := h.Backend().NewChannelEvent(channel, eventType, urn).WithOccurredOn(date)
 
-            // build our extra
-            extra := map[string]interface{}{
-                titleKey:   msg.Postback.Title,
-                payloadKey: msg.Postback.Payload,
-            }
+			// build our extra
+			extra := map[string]interface{}{
+				titleKey:   msg.Postback.Title,
+				payloadKey: msg.Postback.Payload,
+			}
 
-            // add in referral information if we have it
-            if eventType == courier.Referral {
-                extra[referrerIDKey] = msg.Postback.Referral.Ref
-                extra[sourceKey] = msg.Postback.Referral.Source
-                extra[typeKey] = msg.Postback.Referral.Type
-            }
+			// add in referral information if we have it
+			if eventType == courier.Referral {
+				extra[referrerIDKey] = msg.Postback.Referral.Ref
+				extra[sourceKey] = msg.Postback.Referral.Source
+				extra[typeKey] = msg.Postback.Referral.Type
+			}
 
-            event = event.WithExtra(extra)
+			event = event.WithExtra(extra)
 
-            err := h.Backend().WriteChannelEvent(ctx, event)
-            if err != nil {
-                return nil, err
-            }
+			err := h.Backend().WriteChannelEvent(ctx, event)
+			if err != nil {
+				return nil, err
+			}
 
-            events = append(events, event)
-            data = append(data, courier.NewEventReceiveData(event))
+			events = append(events, event)
+			data = append(data, courier.NewEventReceiveData(event))
 
-        } else if msg.Referral != nil {
-            // this is an incoming referral
-            event := h.Backend().NewChannelEvent(channel, courier.Referral, urn).WithOccurredOn(date)
+		} else if msg.Referral != nil {
+			// this is an incoming referral
+			event := h.Backend().NewChannelEvent(channel, courier.Referral, urn).WithOccurredOn(date)
 
-            // build our extra
-            extra := map[string]interface{}{
-                sourceKey: msg.Referral.Source,
-                typeKey:   msg.Referral.Type,
-            }
+			// build our extra
+			extra := map[string]interface{}{
+				sourceKey: msg.Referral.Source,
+				typeKey:   msg.Referral.Type,
+			}
 
-            // add referrer id if present
-            if msg.Referral.Ref != "" {
-                extra[referrerIDKey] = msg.Referral.Ref
-            }
+			// add referrer id if present
+			if msg.Referral.Ref != "" {
+				extra[referrerIDKey] = msg.Referral.Ref
+			}
 
-            // add ad id if present
-            if msg.Referral.AdID != "" {
-                extra[adIDKey] = msg.Referral.AdID
-            }
-            event = event.WithExtra(extra)
+			// add ad id if present
+			if msg.Referral.AdID != "" {
+				extra[adIDKey] = msg.Referral.AdID
+			}
+			event = event.WithExtra(extra)
 
-            err := h.Backend().WriteChannelEvent(ctx, event)
-            if err != nil {
-                return nil, err
-            }
+			err := h.Backend().WriteChannelEvent(ctx, event)
+			if err != nil {
+				return nil, err
+			}
 
-            events = append(events, event)
-            data = append(data, courier.NewEventReceiveData(event))
+			events = append(events, event)
+			data = append(data, courier.NewEventReceiveData(event))
 
-        } else if msg.Message != nil {
-            // this is an incoming message
+		} else if msg.Message != nil {
+			// this is an incoming message
 
-            // ignore echos
-            if msg.Message.IsEcho {
-                data = append(data, courier.NewInfoData("ignoring echo"))
-                continue
-            }
+			// ignore echos
+			if msg.Message.IsEcho {
+				data = append(data, courier.NewInfoData("ignoring echo"))
+				continue
+			}
 
-            // create our message
-            event := h.Backend().NewIncomingMsg(channel, urn, msg.Message.Text).WithExternalID(msg.Message.MID).WithReceivedOn(date)
+			// create our message
+			event := h.Backend().NewIncomingMsg(channel, urn, msg.Message.Text).WithExternalID(msg.Message.MID).WithReceivedOn(date)
 
-            // add any attachments
-            for _, att := range msg.Message.Attachments {
-                if att.Payload != nil && att.Payload.URL != "" {
-                    event.WithAttachment(att.Payload.URL)
-                }
-            }
+			// add any attachments
+			for _, att := range msg.Message.Attachments {
+				if att.Payload != nil && att.Payload.URL != "" {
+					event.WithAttachment(att.Payload.URL)
+				}
+			}
 
-            err := h.Backend().WriteMsg(ctx, event)
-            if err != nil {
-                return nil, err
-            }
+			err := h.Backend().WriteMsg(ctx, event)
+			if err != nil {
+				return nil, err
+			}
 
-            events = append(events, event)
-            data = append(data, courier.NewMsgReceiveData(event))
+			events = append(events, event)
+			data = append(data, courier.NewMsgReceiveData(event))
 
-        } else if msg.Delivery != nil {
-            // this is a delivery report
-            for _, mid := range msg.Delivery.MIDs {
-                event := h.Backend().NewMsgStatusForExternalID(channel, mid, courier.MsgDelivered)
-                err := h.Backend().WriteMsgStatus(ctx, event)
+		} else if msg.Delivery != nil {
+			// this is a delivery report
+			for _, mid := range msg.Delivery.MIDs {
+				event := h.Backend().NewMsgStatusForExternalID(channel, mid, courier.MsgDelivered)
+				err := h.Backend().WriteMsgStatus(ctx, event)
 
-                // we don't know about this message, just tell them we ignored it
-                if err == courier.ErrMsgNotFound {
-                    data = append(data, courier.NewInfoData("message not found, ignored"))
-                    continue
-                }
+				// we don't know about this message, just tell them we ignored it
+				if err == courier.ErrMsgNotFound {
+					data = append(data, courier.NewInfoData("message not found, ignored"))
+					continue
+				}
 
-                if err != nil {
-                    return nil, err
-                }
+				if err != nil {
+					return nil, err
+				}
 
-                events = append(events, event)
-                data = append(data, courier.NewStatusData(event))
-            }
+				events = append(events, event)
+				data = append(data, courier.NewStatusData(event))
+			}
 
-        } else {
-            data = append(data, courier.NewInfoData("ignoring unknown entry type"))
-        }
-    }
+		} else {
+			data = append(data, courier.NewInfoData("ignoring unknown entry type"))
+		}
+	}
 
-    return events, courier.WriteDataResponse(ctx, w, http.StatusOK, "Events Handled", data)
+	return events, courier.WriteDataResponse(ctx, w, http.StatusOK, "Events Handled", data)
 }
 
 // {
@@ -468,7 +468,6 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
             // this is still a msg part
             payload.Message.Text = msgParts[i]
             payload.Message.Attachment = nil
-
         } else {
             // this is an attachment
             payload.Message.Attachment = &mtAttachment{}
@@ -492,8 +491,8 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
             } else if len(ubs) > 0 {
                 mtb := []mtURLButton{}
                 for _, ub := range ubs {
-                     mtb = append(mtb, mtURLButton{"web_url", ub.Title, ub.Url, "tall", "false"})
-                 }
+                    mtb = append(mtb, mtURLButton{"web_url", ub.Title, ub.Url, "tall", "false"})
+                }
                 payload.Message.Attachment = &mtAttachment{}
                 payload.Message.Attachment.Type = "template"
                 payload.Message.Attachment.Payload.TemplateType = "button"
