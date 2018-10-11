@@ -142,6 +142,8 @@ func (b *backend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.Msg, 
 	defer rc.Close()
 
 	dbMsg := msg.(*DBMsg)
+
+	clearMsgSeen(rc, dbMsg)
 	queue.MarkComplete(rc, msgQueueName, dbMsg.workerToken)
 
 	// mark as sent in redis as well if this was actually wired or sent
@@ -377,7 +379,7 @@ func (b *backend) Start() error {
 	err = b.db.PingContext(ctx)
 	cancel()
 	if err != nil {
-		log.Error("db not reachable")
+		log.WithError(err).Error("db not reachable")
 	} else {
 		log.Info("db ok")
 	}
