@@ -42,17 +42,18 @@ var sendTestCases = []ChannelSendTestCase{
 		Status:         "W",
 		ResponseBody:   "success",
 		ResponseStatus: 200,
-		//Metadata: []byte(`
-		//	"quick_replies": [
-		//		{
-		//			"title": "First button"
-		//		},
-		//		{
-		//			"title": "Second button"
-		//		}
-		//	]
-		//`),
-		QuickReplies: []string{"First button", "Second button"},
+		Metadata: []byte(`
+			{
+				"quick_replies": [
+					{
+						"title": "First button"
+					},
+					{
+						"title": "Second button"
+					}
+				]
+			}
+		`),
 		// TODO: change the fcm: from the RequestBody
 		RequestBody: `{"to":"fcm:yl-UYhnSFDNYvGDqAVOK","text":"Simple Message","metadata":{"quick_replies":[{"title":"First button"},{"title":"Second button"}]}}`,
 		SendPrep:    setSendURL,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -33,6 +34,11 @@ type sendForm struct {
 	Metadata struct {
 		QuickReplies []quickReply `json:"quick_replies,omitempty"`
 	} `json:"metadata"`
+}
+
+type rawMessage struct {
+	To   string `json:"to" validate:"required"`
+	Text string `json:"text"`
 }
 
 type receiveForm struct {
@@ -80,9 +86,16 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 	form.Text = msg.Text()
 
 	// check if QuickReplies is empty
-	if len(msg.QuickReplies()) > 0 {
-		for _, reply := range msg.QuickReplies() {
-			form.Metadata.QuickReplies = append(form.Metadata.QuickReplies, quickReply{Title: reply})
+	fmt.Println(form)
+	if len(msg.Metadata()) > 0 {
+		var metadataJson map[string][]quickReply
+		err := json.Unmarshal(msg.Metadata(), &metadataJson)
+		if err != nil {
+			fmt.Println(err)
+			log.Fatalln(err)
+		}
+		for _, reply := range metadataJson["quick_replies"] {
+			form.Metadata.QuickReplies = append(form.Metadata.QuickReplies, reply)
 		}
 	}
 
