@@ -58,13 +58,14 @@ func getLineIndex(path string) (int, error) {
 	var parenthesis int = 0
 	var line int = 0
 	for i = 0; i < len(code); i++ {
-		if code[i] == '(' || code[i] == ')' {
+		s := string(code[i])
+		if s == "(" || s == ")" {
 			parenthesis++
 		}
 		if parenthesis == 2 {
 			break
 		}
-		if code[i] == '\n' {
+		if s == "\n" {
 			line++
 		}
 	}
@@ -91,5 +92,4 @@ func main() {
 	if err != nil {
 		fmt.Println("Some error occurred, please, try again!")
 	}
-
 }
