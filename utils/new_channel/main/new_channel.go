@@ -73,22 +73,21 @@ func getLineIndex(path string) (int, error) {
 }
 
 func main() {
-	path := flag.String("path", "../foo/main.go", "A path to main.go")
-	moduleURL := flag.String("module_url", "github.com/your/module/url", "A URL to your new channel")
+	channelPath := flag.String("channelPath", "github.com/your/channel/path", "A path to your new channel")
 	flag.Parse()
-	if *path == "../foo/main.go" || *moduleURL == "github.com/your/module/url" {
+	if *channelPath == "github.com/your/module/url" {
 		fmt.Println("Please, type the correct command line args")
 		return
 	}
-
-	index, err := getLineIndex(*path)
+	filePath := "../../../cmd/courier/main.go"
+	index, err := getLineIndex(filePath)
 	if err != nil {
 		fmt.Println(err)
 		fmt.Println("Error while trying to read file!")
 		return
 	}
 
-	err = insertStringToFile(*path, *moduleURL+"\n", index)
+	err = insertStringToFile(filePath, "\t_ "+`"`+*channelPath+`"`+"\n", index)
 	if err != nil {
 		fmt.Println("Some error occurred, please, try again!")
 	}
