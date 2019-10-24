@@ -15,7 +15,6 @@ var testChannels = []courier.Channel{
 }
 
 func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.Msg) {
-	fmt.Println(s.URL)
 	sendURL = s.URL
 }
 
