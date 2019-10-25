@@ -51,9 +51,9 @@ func (h *handler) Initialize(s courier.Server) error {
 //	<description>Completed</description>
 //</response>
 type mtResponse struct {
-	Input		string `xml:"input"`
-	Status		string `xml:"status"`
-	Description	string `xml:"description"`
+	Input       string `xml:"input"`
+	Status      string `xml:"status"`
+	Description string `xml:"description"`
 }
 
 // SendMsg sends the passed in message, returning any error
