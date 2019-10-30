@@ -44,6 +44,7 @@ import (
 	_ "github.com/nyaruka/courier/handlers/novo"
 	_ "github.com/nyaruka/courier/handlers/playmobile"
 	_ "github.com/nyaruka/courier/handlers/plivo"
+	_ "github.com/nyaruka/courier/handlers/pushinho"
 	_ "github.com/nyaruka/courier/handlers/redrabbit"
 	_ "github.com/nyaruka/courier/handlers/shaqodoon"
 	_ "github.com/nyaruka/courier/handlers/smscentral"
@@ -56,7 +57,6 @@ import (
 	_ "github.com/nyaruka/courier/handlers/wechat"
 	_ "github.com/nyaruka/courier/handlers/whatsapp"
 	_ "github.com/nyaruka/courier/handlers/yo"
-	_ "github.com/nyaruka/courier/handlers/zenvia"
 
 	// load available backends
 	_ "github.com/nyaruka/courier/backends/rapidpro"

@@ -11,7 +11,8 @@ import (
 )
 
 var testChannels = []courier.Channel{
-	courier.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c568c", "PS", "1234", "", map[string]interface{}{}),
+	// courier.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c568c", "PS", "1234", "", map[string]interface{}{}),
+	courier.NewMockChannel("781ea439-470d-4d9f-8045-115ec4d71001", "PS", "1234", "", map[string]interface{}{}),
 }
 
 func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.Msg) {
@@ -20,10 +21,12 @@ func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel,
 
 var (
 	// TODO: change the receive url to the correct uuid
-	receiveURL  = "/c/ps/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive"
+	receiveURL  = "/c/ps/781ea439-470d-4d9f-8045-115ec4d71001/receive"
 	validMsg    = "from=yl-UYhnSFDNYvGDqAVOK&text=hello+world"
 	missingText = "from=yl-UYhnSFDNYvGDqAVOK"
 	missingFrom = "text=hello+world"
+	task        = "from=yl-UYhnSFDNYvGDqAVOK&text=asd"
+	taskURL     = "/c/ps/781ea439-470d-4d9f-8045-115ec4d71001/receive"
 )
 
 var sendTestCases = []ChannelSendTestCase{
@@ -65,6 +68,7 @@ var receiveTestCase = []ChannelHandleTestCase{
 		Text: Sp("hello world"), URN: Sp("ps:yl-UYhnSFDNYvGDqAVOK")},
 	{Label: "Receive Missing From", URL: receiveURL, Data: missingFrom, Status: 400, Response: "field 'from' required"},
 	{Label: "Receive Missing Text", URL: receiveURL, Data: missingText, Status: 200, Response: "Accepted"},
+	{Label: "Task", URL: taskURL, Data: task, Status: 200, Response: "Accepted"},
 }
 
 func newServer(backend courier.Backend) courier.Server {
@@ -76,8 +80,13 @@ func newServer(backend courier.Backend) courier.Server {
 	return courier.NewServerWithLogger(courier.NewConfig(), backend, logger)
 }
 
+func MyFunction() {
+
+}
+
 func TestReceiveMessage(t *testing.T) {
 	RunChannelTestCases(t, testChannels, newHandler(), receiveTestCase)
+	MyFunction()
 }
 
 func TestSendMessage(t *testing.T) {

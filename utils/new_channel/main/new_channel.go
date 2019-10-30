@@ -2,10 +2,10 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 )
 
@@ -72,23 +72,94 @@ func getLineIndex(path string) (int, error) {
 	return line - 3, nil //returning 3 positions before the last parenthesis, to assure the correct index
 }
 
-func main() {
-	channelPath := flag.String("channelPath", "github.com/your/channel/path", "A path to your new channel")
-	flag.Parse()
-	if *channelPath == "github.com/your/module/url" {
-		fmt.Println("Please, type the correct command line args")
-		return
+func readDirectories(directories []os.FileInfo, pastChannels map[string]bool) []string {
+	var actualChannels []string
+	for _, f := range directories {
+		if f.IsDir() {
+			if !pastChannels[f.Name()] {
+				fmt.Println(f.Name() + " still hasn't been created!")
+				actualChannels = append(actualChannels, f.Name())
+			}
+		}
 	}
-	filePath := "../../../cmd/courier/main.go"
-	index, err := getLineIndex(filePath)
+	return actualChannels
+}
+
+func readChannelList() map[string]bool {
+	var myChannels map[string]bool = make(map[string]bool)
+	channelsList, err := ioutil.ReadFile("channels_list.txt")
 	if err != nil {
 		fmt.Println(err)
-		fmt.Println("Error while trying to read file!")
+	}
+	var channel string = ""
+	for _, byteInFile := range string(channelsList) {
+		if string(byteInFile) == "\n" {
+			myChannels[channel] = true
+			channel = ""
+		} else {
+			channel += string(byteInFile)
+		}
+	}
+	myChannels[channel] = true // adding the last one from the file to our map
+	return myChannels
+}
+
+func getDirectories() []string {
+	newFile, err := os.OpenFile("channels_list.txt", os.O_RDWR, 0644)
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+	defer newFile.Close()
+	directoriesPath := "../../../handlers"
+	actualDirectories, err := ioutil.ReadDir(directoriesPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	pastChannels := readChannelList()
+	return readDirectories(actualDirectories, pastChannels)
+}
+
+func saveNewChannels(newChannels []string) {
+	channelsList, err := ioutil.ReadFile("channels_list.txt")
+	if err != nil {
+		fmt.Println(err)
 		return
 	}
-
-	err = insertStringToFile(filePath, "\t_ "+`"`+*channelPath+`"`+"\n", index)
+	fileString := ""
+	for _, ch := range string(channelsList) {
+		fileString += string(ch)
+	}
+	var changes string = ""
+	for i := range newChannels {
+		changes += "\n" + newChannels[i]
+	}
+	b := []byte(fileString + changes)
+	err = ioutil.WriteFile("channels_list.txt", b, 0644)
 	if err != nil {
-		fmt.Println("Some error occurred, please, try again!")
+		fmt.Println(err)
+	}
+	fmt.Println("New channels list updated with success!")
+}
+
+func main() {
+	channelsList := getDirectories()
+	saveNewChannels(channelsList)
+	const filePath = "../../../cmd/courier/main.go"
+	for i := 0; i < len(channelsList); i++ {
+		channelPath := "github.com/nyaruka/courier/handlers/" + channelsList[i]
+		index, err := getLineIndex(filePath)
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println("Error while trying to read file!")
+			return
+		}
+		index = index - 1
+		fmt.Println(channelPath)
+		err = insertStringToFile(filePath, "\t_ "+`"`+channelPath+`"`+"\n", index)
+		if err != nil {
+			fmt.Println("Some error occurred, please, try again!")
+		}
+		fmt.Println(channelsList[i])
 	}
 }
