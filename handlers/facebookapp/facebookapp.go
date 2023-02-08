@@ -8,12 +8,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/buger/jsonparser"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
@@ -1239,7 +1242,9 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 	base, _ := url.Parse(graphURL)
 	path, _ := url.Parse(fmt.Sprintf("/%s/messages", msg.Channel().Address()))
+	pathMedia, _ := url.Parse(fmt.Sprintf("/%s/media", msg.Channel().Address()))
 	wacPhoneURL := base.ResolveReference(path)
+	wacUploadMediaURL := base.ResolveReference(pathMedia)
 
 	status := h.Backend().NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgErrored)
 
@@ -1401,34 +1406,73 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			}
 
 		} else if i < len(msg.Attachments()) && len(qrs) == 0 || len(qrs) > 3 && i < len(msg.Attachments()) {
-			attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
-			attType = strings.Split(attType, "/")[0]
+			mimetype, attURL := handlers.SplitAttachment(msg.Attachments()[i])
+			filename, _ := utils.BasePathForURL(attURL)
+			attType := strings.Split(mimetype, "/")[0]
 			parsedURL, err := url.Parse(attURL)
 			if err != nil {
 				return status, err
 			}
+
 			if attType == "application" {
 				attType = "document"
 			}
+
+			resp, err := http.Get(attURL)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			body := &bytes.Buffer{}
+			writer := multipart.NewWriter(body)
+
+			part, _ := writer.CreateFormFile("file", filename)
+			io.Copy(part, resp.Body)
+
+			partType, _ := writer.CreateFormField("type")
+			partType.Write([]byte(mimetype))
+
+			partMessagingProduct, _ := writer.CreateFormField("messaging_product")
+			partMessagingProduct.Write([]byte("whatsapp"))
+
+			writer.Close()
+
+			req, err := http.NewRequest(http.MethodPost, wacUploadMediaURL.String(), bytes.NewReader(body.Bytes()))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+
+			rr, err := utils.MakeHTTPRequest(req)
+
+			respPayload := &wacMTMedia{}
+			err = json.Unmarshal(rr.Body, respPayload)
+			if err != nil {
+				log.WithError("Message Send Error", errors.Errorf("unable to unmarshal response body"))
+				respPayload.Link = parsedURL.String()
+			}
+
 			payload.Type = attType
-			media := wacMTMedia{Link: parsedURL.String()}
+			media := respPayload
 			if len(msgParts) == 1 && attType != "audio" && len(msg.Attachments()) == 1 && len(msg.QuickReplies()) == 0 {
 				media.Caption = msgParts[i]
 				hasCaption = true
 			}
 
 			if attType == "image" {
-				payload.Image = &media
+				payload.Image = media
 			} else if attType == "audio" {
-				payload.Audio = &media
+				payload.Audio = media
 			} else if attType == "video" {
-				payload.Video = &media
+				payload.Video = media
 			} else if attType == "document" {
-				media.Filename, err = utils.BasePathForURL(attURL)
+				media.Filename = filename
 				if err != nil {
 					return nil, err
 				}
-				payload.Document = &media
+				payload.Document = media
 			}
 		} else {
 			if len(qrs) > 0 {
