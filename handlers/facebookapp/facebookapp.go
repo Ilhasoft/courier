@@ -1418,7 +1418,6 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			resp, err := http.Get(parsedURL.String())
 			if err != nil {
-				fmt.Println("error download")
 				return nil, err
 			}
 			defer resp.Body.Close()
@@ -1427,24 +1426,19 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			writer := multipart.NewWriter(body)
 			writer.WriteField("messaging_product", "whatsapp")
 			part, _ := writer.CreateFormFile("file", filename)
-			_, err = io.Copy(part, resp.Body)
-			if err != nil {
-				fmt.Println(err)
-			}
+			io.Copy(part, resp.Body)
 
 			writer.Close()
 
 			req, err := http.NewRequest(http.MethodPost, wacUploadMediaURL.String(), bytes.NewReader(body.Bytes()))
 			if err != nil {
-				fmt.Println(err)
 				return nil, err
 			}
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-			req.Header.Set("Content-Type", writer.FormDataContentType())
+			req.Header.Set("Content-Type", mimetype)
 
 			rr, err := utils.MakeHTTPRequest(req)
 			if err != nil {
-				fmt.Println(err)
 				fmt.Println(string(rr.Body[:]))
 				return nil, err
 			}
