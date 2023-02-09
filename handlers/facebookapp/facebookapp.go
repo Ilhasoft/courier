@@ -1448,7 +1448,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			rr, err := utils.MakeHTTPRequest(req)
 			if err != nil {
 				fmt.Println(err)
-				fmt.Println(fmt.Sprint(resp.Body))
+				fmt.Println(string(rr.Body[:]))
 				return nil, err
 			}
 
