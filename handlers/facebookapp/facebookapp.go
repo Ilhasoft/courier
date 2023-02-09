@@ -1439,16 +1439,22 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			req, err := http.NewRequest(http.MethodPost, wacUploadMediaURL.String(), bytes.NewReader(body.Bytes()))
 			if err != nil {
+				fmt.Println(err)
 				return nil, err
 			}
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 			req.Header.Set("Content-Type", writer.FormDataContentType())
 
 			rr, err := utils.MakeHTTPRequest(req)
+			if err != nil {
+				fmt.Println(err)
+				return nil, err
+			}
 
 			respPayload := &wacMTMedia{}
 			err = json.Unmarshal(rr.Body, respPayload)
 			if err != nil {
+				fmt.Println(err)
 				respPayload.Link = parsedURL.String()
 			}
 
