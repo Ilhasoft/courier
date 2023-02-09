@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apex/log"
 	"github.com/buger/jsonparser"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
@@ -1450,7 +1449,6 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			respPayload := &wacMTMedia{}
 			err = json.Unmarshal(rr.Body, respPayload)
 			if err != nil {
-				log.WithError("Message Send Error", errors.Errorf("unable to unmarshal response body"))
 				respPayload.Link = parsedURL.String()
 			}
 
