@@ -1418,17 +1418,19 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			resp, err := http.Get(parsedURL.String())
 			if err != nil {
+				fmt.Println("error download")
 				return nil, err
 			}
 			defer resp.Body.Close()
 
 			body := &bytes.Buffer{}
 			writer := multipart.NewWriter(body)
+			writer.WriteField("messaging_product", "whatsapp")
 			part, _ := writer.CreateFormFile("file", filename)
-			io.Copy(part, resp.Body)
-
-			partMessagingProduct, _ := writer.CreateFormField("messaging_product")
-			partMessagingProduct.Write([]byte("whatsapp"))
+			_, err = io.Copy(part, resp.Body)
+			if err != nil {
+				fmt.Println(err)
+			}
 
 			writer.Close()
 
