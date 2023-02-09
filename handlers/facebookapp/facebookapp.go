@@ -1424,15 +1424,9 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			body := &bytes.Buffer{}
 			writer := multipart.NewWriter(body)
-
+			writer.WriteField("messaging_product", "whatsapp")
 			part, _ := writer.CreateFormFile("file", filename)
 			io.Copy(part, resp.Body)
-
-			partType, _ := writer.CreateFormField("type")
-			partType.Write([]byte(mimetype))
-
-			partMessagingProduct, _ := writer.CreateFormField("messaging_product")
-			partMessagingProduct.Write([]byte("whatsapp"))
 
 			writer.Close()
 
@@ -1441,7 +1435,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 				return nil, err
 			}
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-			req.Header.Set("Content-Type", mimetype)
+			req.Header.Set("Content-Type", "multipart/form-data")
 
 			rr, err := utils.MakeHTTPRequest(req)
 			if err != nil {
