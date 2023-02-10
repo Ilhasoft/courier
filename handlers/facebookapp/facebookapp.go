@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1424,12 +1424,17 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			body := &bytes.Buffer{}
 			writer := multipart.NewWriter(body)
-
-			part, _ := writer.CreateFormFile("file", filename)
-			io.Copy(part, resp.Body)
-
 			writer.WriteField("type", filename)
 			writer.WriteField("messaging_product", "whatsapp")
+			//part, _ := writer.CreateFormFile("file", filename)
+			head := make(textproto.MIMEHeader)
+			head.Set("Content-Disposition",
+				fmt.Sprintf(`form-data; name="file"; filename="%s"`, filename))
+			if mimetype != "" {
+				head.Set("Content-Type", mimetype)
+			}
+
+			writer.CreatePart(head)
 
 			writer.Close()
 
