@@ -1424,10 +1424,22 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			body := &bytes.Buffer{}
 			writer := multipart.NewWriter(body)
-			writer.WriteField("type", mimetype)
-			writer.WriteField("messaging_product", "whatsapp")
-			part, _ := writer.CreateFormFile("file", filename)
-			io.Copy(part, resp.Body)
+			err = writer.WriteField("type", mimetype)
+			if err != nil {
+				fmt.Println("Erro type: ", err)
+			}
+			err = writer.WriteField("messaging_product", "whatsapp")
+			if err != nil {
+				fmt.Println("Erro mp: ", err)
+			}
+			part, err := writer.CreateFormFile("file", filename)
+			if err != nil {
+				fmt.Println("Erro file: ", err)
+			}
+			_, err = io.Copy(part, resp.Body)
+			if err != nil {
+				fmt.Println("Erro copy: ", err)
+			}
 
 			writer.Close()
 
