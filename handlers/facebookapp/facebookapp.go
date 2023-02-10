@@ -1438,14 +1438,19 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 			req.Header.Set("Content-Type", "multipart/form-data")
 
-			rr, err := utils.MakeHTTPRequest(req)
+			client := &http.Client{}
+			rr, err := client.Do(req)
+
+			var bodyContent []byte
+			rr.Body.Read(bodyContent)
+			// rr, err := utils.MakeHTTPRequest(req)
 			if err != nil {
-				fmt.Println(string(rr.Body[:]))
+				fmt.Println(string(bodyContent[:]))
 				return nil, err
 			}
 
 			respPayload := &wacMTMedia{}
-			err = json.Unmarshal(rr.Body, respPayload)
+			err = json.Unmarshal(bodyContent, respPayload)
 			if err != nil {
 				fmt.Println(err)
 				respPayload.Link = parsedURL.String()
