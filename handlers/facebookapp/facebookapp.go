@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1427,9 +1428,15 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			writer := multipart.NewWriter(body)
 			writer.WriteField("type", mimetype)
 			writer.WriteField("messaging_product", "whatsapp")
-			part, _ := writer.CreateFormFile("file", filename)
+			//part, _ := writer.CreateFormFile("file", "test.png")
+			h := make(textproto.MIMEHeader)
+			h.Set("Content-Disposition",
+				fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+					"file", filename))
+			h.Set("Content-Type", mimetype)
+			part, _ := writer.CreatePart(h)
 			io.Copy(part, resp.Body)
-
+			fmt.Println("Mimetime: ", writer.FormDataContentType())
 			writer.Close()
 
 			req, err := http.NewRequest(http.MethodPost, wacUploadMediaURL.String(), bytes.NewReader(body.Bytes()))
@@ -1437,7 +1444,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 				return nil, err
 			}
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-			req.Header.Set("Content-Type", mimetype)
+			req.Header.Add("Content-Type", mimetype)
 
 			client := &http.Client{}
 			rr, err := client.Do(req)
