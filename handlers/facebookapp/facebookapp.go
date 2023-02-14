@@ -1444,7 +1444,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 				return nil, err
 			}
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-			req.Header.Add("Content-Type", mimetype)
+			req.Header.Add("Content-Type", writer.FormDataContentType())
 
 			client := &http.Client{}
 			rr, err := client.Do(req)
