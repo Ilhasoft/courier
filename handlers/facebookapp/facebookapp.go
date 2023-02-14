@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -1440,19 +1441,26 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 
 			client := &http.Client{}
 			rr, err := client.Do(req)
-
-			var bodyContent []byte
-			rr.Body.Read(bodyContent)
-			// rr, err := utils.MakeHTTPRequest(req)
 			if err != nil {
-				fmt.Println(string(bodyContent[:]))
+				fmt.Println("Erro Request")
 				return nil, err
 			}
 
-			respPayload := &wacMTMedia{}
-			err = json.Unmarshal(bodyContent, respPayload)
+			bodyBytes, err := ioutil.ReadAll(rr.Body)
 			if err != nil {
-				fmt.Println(err)
+				fmt.Println("Erro Request: ", string(bodyBytes))
+				return nil, err
+			}
+			// rr, err := utils.MakeHTTPRequest(req)
+			// if err != nil {
+			// 	fmt.Println("Erro request: ", string(bodyContent[:]))
+			// 	return nil, err
+			// }
+			fmt.Println("Request: ", string(bodyBytes))
+			respPayload := &wacMTMedia{}
+			err = json.Unmarshal(bodyBytes, respPayload)
+			if err != nil {
+				fmt.Println("Erro unmarshal: ", err)
 				respPayload.Link = parsedURL.String()
 			}
 
