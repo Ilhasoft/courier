@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -1407,13 +1407,15 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			}
 
 		} else if i < len(msg.Attachments()) && len(qrs) == 0 || len(qrs) > 3 && i < len(msg.Attachments()) {
-			mimetype, attURL := handlers.SplitAttachment(msg.Attachments()[i])
+			attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
 			filename, _ := utils.BasePathForURL(attURL)
-			attType := strings.Split(mimetype, "/")[0]
+			attType = strings.Split(attType, "/")[0]
+
 			parsedURL, err := url.Parse(attURL)
 			if err != nil {
 				return status, err
 			}
+
 			if attType == "application" {
 				attType = "document"
 			}
@@ -1424,19 +1426,21 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			}
 			defer resp.Body.Close()
 
+			mimeType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+
 			body := &bytes.Buffer{}
 			writer := multipart.NewWriter(body)
-			writer.WriteField("type", mimetype)
+			writer.WriteField("type", mimeType)
 			writer.WriteField("messaging_product", "whatsapp")
-			//part, _ := writer.CreateFormFile("file", "test.png")
+
 			h := make(textproto.MIMEHeader)
 			h.Set("Content-Disposition",
 				fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
 					"file", filename))
-			h.Set("Content-Type", "image/png")
+			h.Set("Content-Type", mimeType)
 			part, _ := writer.CreatePart(h)
 			io.Copy(part, resp.Body)
-			fmt.Println("Mimetime: ", writer.FormDataContentType())
+
 			writer.Close()
 
 			req, err := http.NewRequest(http.MethodPost, wacUploadMediaURL.String(), bytes.NewReader(body.Bytes()))
@@ -1446,29 +1450,15 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 			req.Header.Add("Content-Type", writer.FormDataContentType())
 
-			client := &http.Client{}
-			rr, err := client.Do(req)
+			rr, err := utils.MakeHTTPRequest(req)
 			if err != nil {
-				fmt.Println("Erro Request")
 				return nil, err
 			}
 
-			bodyBytes, err := ioutil.ReadAll(rr.Body)
-			if err != nil {
-				fmt.Println("Erro Request: ", string(bodyBytes))
-				return nil, err
-			}
-			// rr, err := utils.MakeHTTPRequest(req)
-			// if err != nil {
-			// 	fmt.Println("Erro request: ", string(bodyContent[:]))
-			// 	return nil, err
-			// }
-			fmt.Println("Request: ", string(bodyBytes))
 			respPayload := &wacMTMedia{}
-			err = json.Unmarshal(bodyBytes, respPayload)
+			err = json.Unmarshal(rr.Body, respPayload)
 			if err != nil {
-				fmt.Println("Erro unmarshal: ", err)
-				respPayload.Link = parsedURL.String()
+				return nil, err
 			}
 
 			payload.Type = attType
