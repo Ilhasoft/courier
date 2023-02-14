@@ -1433,7 +1433,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			h.Set("Content-Disposition",
 				fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
 					"file", filename))
-			h.Set("Content-Type", mimetype)
+			h.Set("Content-Type", "image/png")
 			part, _ := writer.CreatePart(h)
 			io.Copy(part, resp.Body)
 			fmt.Println("Mimetime: ", writer.FormDataContentType())
