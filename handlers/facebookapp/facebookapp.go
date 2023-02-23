@@ -410,6 +410,14 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 
 	}
 
+	webhookURL := channel.StringConfigForKey("webhook", "")
+	if webhookURL != "" {
+		err = handlers.SendWebhooks(channel, r, webhookURL)
+		if err != nil {
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
