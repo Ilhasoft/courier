@@ -7,8 +7,13 @@ import (
 	"github.com/nyaruka/courier/utils"
 )
 
-func SendWebhooks(channel courier.Channel, r *http.Request, webhook string) error {
-	req, err := http.NewRequest(http.MethodPost, webhook, r.Body)
+type Webhook struct {
+	URL string
+}
+
+func SendWebhooks(channel courier.Channel, r *http.Request, webhook interface{}) error {
+	webhookURL := webhook.(Webhook)
+	req, err := http.NewRequest(http.MethodPost, webhookURL.URL, r.Body)
 	if err != nil {
 		return err
 	}
