@@ -13,11 +13,11 @@ type Webhook struct {
 }
 
 func SendWebhooks(channel courier.Channel, r *http.Request, webhook interface{}) error {
-	webhookURL, ok := webhook.(map[string]string)
+	webhookURL, ok := webhook.(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("")
+		return fmt.Errorf("Error webhook")
 	}
-	req, err := http.NewRequest(http.MethodPost, webhookURL["url"], r.Body)
+	req, err := http.NewRequest(http.MethodPost, webhookURL["url"].(string), r.Body)
 	if err != nil {
 		return err
 	}
