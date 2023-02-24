@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/nyaruka/courier"
@@ -12,7 +13,11 @@ type Webhook struct {
 }
 
 func SendWebhooks(channel courier.Channel, r *http.Request, webhook interface{}) error {
-	webhookURL := webhook.(Webhook)
+	fmt.Println(webhook)
+	webhookURL, ok := webhook.(Webhook)
+	if !ok {
+		return fmt.Errorf("")
+	}
 	req, err := http.NewRequest(http.MethodPost, webhookURL.URL, r.Body)
 	if err != nil {
 		return err
