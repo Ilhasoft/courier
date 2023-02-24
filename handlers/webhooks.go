@@ -9,16 +9,15 @@ import (
 )
 
 type Webhook struct {
-	URL string
+	URL string `json:"url"`
 }
 
 func SendWebhooks(channel courier.Channel, r *http.Request, webhook interface{}) error {
-	fmt.Println(webhook)
-	webhookURL, ok := webhook.(Webhook)
+	webhookURL, ok := webhook.(map[string]string)
 	if !ok {
 		return fmt.Errorf("")
 	}
-	req, err := http.NewRequest(http.MethodPost, webhookURL.URL, r.Body)
+	req, err := http.NewRequest(http.MethodPost, webhookURL["url"], r.Body)
 	if err != nil {
 		return err
 	}
