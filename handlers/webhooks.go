@@ -8,10 +8,6 @@ import (
 	"github.com/nyaruka/courier/utils"
 )
 
-type Webhook struct {
-	URL string `json:"url"`
-}
-
 func SendWebhooks(channel courier.Channel, r *http.Request, webhook interface{}) error {
 	webhookURL, ok := webhook.(map[string]interface{})
 	if !ok {
