@@ -15,7 +15,7 @@ type Webhook struct {
 func SendWebhooks(channel courier.Channel, r *http.Request, webhook interface{}) error {
 	webhookURL, ok := webhook.(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("Error webhook")
+		return fmt.Errorf("conversion error")
 	}
 	req, err := http.NewRequest(http.MethodPost, webhookURL["url"].(string), r.Body)
 	if err != nil {
