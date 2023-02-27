@@ -275,7 +275,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 	}
 
 	if !hasError {
-		status.SetStatus(courier.MsgWired)
+		status.SetStatus(courier.MsgRead)
 	}
 
 	return status, nil
