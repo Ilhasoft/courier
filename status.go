@@ -13,7 +13,7 @@ const (
 	MsgWired     MsgStatusValue = "W"
 	MsgErrored   MsgStatusValue = "E"
 	MsgDelivered MsgStatusValue = "D"
-	MsgRead      MsgStatusValue = "X"
+	MsgRead      MsgStatusValue = "Read"
 	MsgFailed    MsgStatusValue = "F"
 	NilMsgStatus MsgStatusValue = ""
 )
