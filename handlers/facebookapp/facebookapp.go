@@ -405,6 +405,13 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 
 	if channel.ChannelType() == "FBA" || channel.ChannelType() == "IG" {
 		events, data, err = h.processFacebookInstagramPayload(ctx, channel, payload, w, r)
+		webhook := channel.ConfigForKey("webhook", nil)
+		if webhook != nil {
+			er := handlers.SendWebhooks(channel, r, webhook)
+			if er != nil {
+				return nil, er
+			}
+		}
 	} else {
 		events, data, err = h.processCloudWhatsAppPayload(ctx, channel, payload, w, r)
 		webhook := channel.ConfigForKey("webhook", nil)
