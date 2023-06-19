@@ -80,7 +80,6 @@ func init() {
 	courier.RegisterHandler(newHandler("IG", "Instagram", false))
 	courier.RegisterHandler(newHandler("FBA", "Facebook", false))
 	courier.RegisterHandler(newHandler("WAC", "WhatsApp Cloud", false))
-
 }
 
 type handler struct {
@@ -1324,6 +1323,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 					if err != nil {
 						return status, err
 					}
+
 					if attType == "application" {
 						attType = "document"
 					}
@@ -1424,6 +1424,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 			if err != nil {
 				return status, err
 			}
+
 			if attType == "application" {
 				attType = "document"
 			}
@@ -1460,6 +1461,7 @@ func (h *handler) sendCloudAPIWhatsappMsg(ctx context.Context, msg courier.Msg) 
 					if len(msg.Attachments()) > 0 {
 						attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
 						attType = strings.Split(attType, "/")[0]
+
 						if attType == "application" {
 							attType = "document"
 						}
