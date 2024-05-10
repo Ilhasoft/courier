@@ -1,3 +1,7 @@
+1.5.3-courier-7.4.0
+----------
+  * Add omitempty in WAC text fields
+
 1.5.2-courier-7.4.0
 ----------
   * Add module to send webhooks for WAC and WA
