@@ -95,26 +95,28 @@ type statusForm struct {
 
 // receiveStatus is our HTTP handler function for status updates
 func (h *handler) receiveStatus(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
+	return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring sent report (message aready wired)")
+
 	// get our params
-	form := &statusForm{}
-	err := handlers.DecodeAndValidateForm(form, r)
-	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-	}
+	// form := &statusForm{}
+	// err := handlers.DecodeAndValidateForm(form, r)
+	// if err != nil {
+	// 	return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+	// }
 
-	msgStatus, found := statusMapping[form.Status]
-	if !found {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("unknown status '%d', must be one of 1,2,4,8,16", form.Status))
-	}
+	// msgStatus, found := statusMapping[form.Status]
+	// if !found {
+	// 	return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("unknown status '%d', must be one of 1,2,4,8,16", form.Status))
+	// }
 
-	// if we are ignoring delivery reports and this isn't failed then move on
-	if channel.BoolConfigForKey(configIgnoreSent, false) && msgStatus == courier.MsgSent {
-		return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring sent report (message aready wired)")
-	}
+	// // if we are ignoring delivery reports and this isn't failed then move on
+	// if channel.BoolConfigForKey(configIgnoreSent, false) && msgStatus == courier.MsgSent {
+	// 	return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring sent report (message aready wired)")
+	// }
 
-	// write our status
-	status := h.Backend().NewMsgStatusForID(channel, form.ID, msgStatus, clog)
-	return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
+	// // write our status
+	// status := h.Backend().NewMsgStatusForID(channel, form.ID, msgStatus, clog)
+	// return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
 }
 
 // Send sends the given message, logging any HTTP calls or errors
@@ -199,22 +201,23 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 		return nil, err
 	}
 
-	// var resp *http.Response
+	var resp *http.Response
 	if verifySSL {
-		_, _, _ = handlers.RequestHTTP(req, clog) //_,resp,err
+		resp, _, err = handlers.RequestHTTP(req, clog)
 	} else {
-		_, _, _ = handlers.RequestHTTPInsecure(req, clog)
+		resp, _, err = handlers.RequestHTTPInsecure(req, clog)
 	}
 
-	status := h.Backend().NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgWired, clog)
-	// if err == nil && resp.StatusCode/100 == 2 {
-	status.SetStatus(courier.MsgWired)
-	// }
+	status := h.Backend().NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgFailed, clog)
+
+	if err == nil && resp.StatusCode/100 == 2 {
+		status.SetStatus(courier.MsgWired)
+	}
 
 	// kannel will respond with a 403 for non-routable numbers, fail permanently in these cases
-	// if resp != nil && resp.StatusCode == 403 {
-	// 	status.SetStatus(courier.MsgFailed)
-	// }
+	if resp != nil && resp.StatusCode == 403 {
+		status.SetStatus(courier.MsgFailed)
+	}
 
 	return status, nil
 }
