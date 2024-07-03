@@ -1,3 +1,7 @@
+1.5.5-courier-7.5.66
+----------
+  * Use failure status to avoid message retry
+
 1.5.4-courier-7.5.66
 ----------
   * Remove errored status for kannel channel
