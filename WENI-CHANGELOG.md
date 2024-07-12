@@ -1,3 +1,7 @@
+1.5.6-courier-7.5.66
+----------
+  * Add support for sending templates with media in WA
+
 1.5.5-courier-7.5.66
 ----------
   * Use failure status to avoid message retry
