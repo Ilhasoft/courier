@@ -803,6 +803,36 @@ var defaultSendTestCases = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
+		Label:   "Media Message Template Send - Image",
+		MsgText: "Media Message Msg", MsgURN: "whatsapp:250788123123",
+		ExpectedMsgStatus: "W", ExpectedExternalID: "157b5e14568e8",
+		MsgMetadata:    json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "namespace": "wa_template_namespace", "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[MockedRequest]*httpx.MockResponse{
+			{
+				Method: "POST",
+				Path:   "/v1/messages",
+				Body:   `{"to":"250788123123","type":"template","template":{"namespace":"wa_template_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]},{"type":"header","parameters":[{"type":"image","image":{"link":"https://foo.bar/image.jpg"}}]}]}}`,
+			}: httpx.NewMockResponse(201, nil, []byte(`{ "messages": [{"id": "157b5e14568e8"}] }`)),
+		},
+		SendPrep: setSendURL,
+	},
+	{
+		Label:   "Media Message Template Send - Video",
+		MsgText: "Media Message Msg", MsgURN: "whatsapp:250788123123",
+		ExpectedMsgStatus: "W", ExpectedExternalID: "157b5e14568e8",
+		MsgMetadata:    json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "namespace": "wa_template_namespace", "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
+		MsgAttachments: []string{"video/mp4:https://foo.bar/video.mp4"},
+		MockResponses: map[MockedRequest]*httpx.MockResponse{
+			{
+				Method: "POST",
+				Path:   "/v1/messages",
+				Body:   `{"to":"250788123123","type":"template","template":{"namespace":"wa_template_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]},{"type":"header","parameters":[{"type":"video","video":{"link":"https://foo.bar/video.mp4"}}]}]}}`,
+			}: httpx.NewMockResponse(201, nil, []byte(`{ "messages": [{"id": "157b5e14568e8"}] }`)),
+		},
+		SendPrep: setSendURL,
+	},
+	{
 		Label:          "Template Invalid Language",
 		MsgText:        "templated message",
 		MsgURN:         "whatsapp:250788123123",
