@@ -484,25 +484,12 @@ type LocalizableParam struct {
 	Default string `json:"default"`
 }
 
-type mmtImage struct {
-	Link string `json:"link,omitempty"`
-}
-
-type mmtDocument struct {
-	Link     string `json:"link,omitempty"`
-	Filename string `json:"filename,omitempty"`
-}
-
-type mmtVideo struct {
-	Link string `json:"link,omitempty"`
-}
-
 type Param struct {
 	Type     string       `json:"type"`
 	Text     string       `json:"text,omitempty"`
-	Image    *mmtImage    `json:"image,omitempty"`
-	Document *mmtDocument `json:"document,omitempty"`
-	Video    *mmtVideo    `json:"video,omitempty"`
+	Image    *mediaObject `json:"image,omitempty"`
+	Document *mediaObject `json:"document,omitempty"`
+	Video    *mediaObject `json:"video,omitempty"`
 }
 
 type Component struct {
@@ -650,7 +637,14 @@ func buildPayloads(msg courier.Msg, h *handler, clog *courier.ChannelLog) ([]int
 
 	textAsCaption := false
 
-	if len(msg.Attachments()) > 0 {
+	// do we have a template?
+	var templating *MsgTemplating
+	templating, err = h.getTemplate(msg)
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to decode template: %s for channel: %s", string(msg.Metadata()), msg.Channel().UUID())
+	}
+
+	if len(msg.Attachments()) > 0 && templating == nil {
 		for attachmentCount, attachment := range msg.Attachments() {
 
 			mimeType, mediaURL := handlers.SplitAttachment(attachment)
@@ -790,12 +784,6 @@ func buildPayloads(msg courier.Msg, h *handler, clog *courier.ChannelLog) ([]int
 		}
 
 	} else {
-		// do we have a template?
-		var templating *MsgTemplating
-		templating, err := h.getTemplate(msg)
-		if err != nil {
-			return nil, errors.Wrapf(err, "unable to decode template: %s for channel: %s", string(msg.Metadata()), msg.Channel().UUID())
-		}
 		if templating != nil {
 			namespace := templating.Namespace
 			if namespace == "" {
@@ -835,6 +823,40 @@ func buildPayloads(msg courier.Msg, h *handler, clog *courier.ChannelLog) ([]int
 					component.Parameters = append(component.Parameters, Param{Type: "text", Text: v})
 				}
 				payload.Template.Components = append(payload.Template.Components, *component)
+
+				if len(msg.Attachments()) > 0 {
+
+					header := &Component{Type: "header"}
+
+					mimeType, mediaURL := handlers.SplitAttachment(msg.Attachments()[0])
+					mediaID, err := h.fetchMediaID(msg, mimeType, mediaURL, clog)
+					if err != nil {
+						logrus.WithField("channel_uuid", msg.Channel().UUID().String()).WithError(err).Error("error while uploading media to whatsapp")
+					}
+					if err == nil && mediaID != "" {
+						mediaURL = ""
+					}
+					mimeType = strings.Split(mimeType, "/")[0]
+					if mimeType == "application" {
+						mimeType = "document"
+					}
+
+					media := mediaObject{ID: mediaID, Link: mediaURL}
+					if mimeType == "image" {
+						header.Parameters = append(header.Parameters, Param{Type: "image", Image: &media})
+					} else if mimeType == "video" {
+						header.Parameters = append(header.Parameters, Param{Type: "video", Video: &media})
+					} else if mimeType == "document" {
+						media.Filename, err = utils.BasePathForURL(mediaURL)
+						if err != nil {
+							return nil, err
+						}
+						header.Parameters = append(header.Parameters, Param{Type: "document", Document: &media})
+					} else {
+						return nil, fmt.Errorf("unknown attachment mime type: %s", mimeType)
+					}
+					payload.Template.Components = append(payload.Template.Components, *header)
+				}
 
 				payloads = append(payloads, payload)
 			}
