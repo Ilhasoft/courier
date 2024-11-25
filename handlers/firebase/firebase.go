@@ -39,8 +39,8 @@ func newHandler() courier.ChannelHandler {
 
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveMessage)
-	s.AddHandlerRoute(h, http.MethodPost, "register", h.registerContact)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receiveMessage)
+	s.AddHandlerRoute(h, http.MethodPost, "register", courier.ChannelLogTypeEventReceive, h.registerContact)
 	return nil
 }
 
@@ -75,7 +75,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// build our msg
-	dbMsg := h.Backend().NewIncomingMsg(channel, urn, form.Msg, clog).WithReceivedOn(date).WithContactName(form.Name).WithURNAuth(form.FCMToken)
+	dbMsg := h.Backend().NewIncomingMsg(channel, urn, form.Msg, "", clog).WithReceivedOn(date).WithContactName(form.Name).WithURNAuth(form.FCMToken)
 
 	// and finally write our message
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.Msg{dbMsg}, w, r, clog)
@@ -109,7 +109,7 @@ func (h *handler) registerContact(ctx context.Context, channel courier.Channel, 
 
 	// return our contact UUID
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(map[string]string{"contact_uuid": contact.UUID().String()})
+	err = json.NewEncoder(w).Encode(map[string]string{"contact_uuid": string(contact.UUID())})
 	return nil, err
 }
 

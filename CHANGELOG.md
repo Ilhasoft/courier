@@ -1,3 +1,168 @@
+v8.2.1 (2023-08-03)
+-------------------------
+ * Always save http_logs as [] rather than null
+
+v8.2.0 (2023-07-31)
+-------------------------
+ * Add docker file for dev
+
+v8.1.33 (2023-07-28)
+-------------------------
+ * Rework deduping of incoming messages to ignore message content if message has id we can use
+ * Use bulk SQL operation for msg status flushing
+
+v8.1.32 (2023-07-26)
+-------------------------
+ * Fix setting of log type of channel logs and add additional types
+
+v8.1.31 (2023-07-20)
+-------------------------
+ * Update deps including gocommon which changes requirement for storage paths to start with slash
+
+v8.1.30 (2023-07-14)
+-------------------------
+ * Adjust to make sure we set the name of the document for the WAC files attached
+
+v8.1.29 (2023-07-12)
+-------------------------
+ * Add log_policy field to channel
+ * Add cpAddress parameters to MTN outbound requests
+
+v8.1.28 (2023-07-10)
+-------------------------
+ * Tweak error message on media parse failure
+
+v8.1.27 (2023-07-04)
+-------------------------
+ * Add writer to write attached logs to storage instead of db
+
+v8.1.26 (2023-07-03)
+-------------------------
+ * Rework writing msg statuses to use Batcher like channel logs
+
+v8.1.25 (2023-07-03)
+-------------------------
+ * Rework log committer to use new generic Batcher type which will be easier to rework to support S3 logs as well
+ * Support requesting attachments for Twilio with basic auth
+
+v8.1.24 (2023-06-28)
+-------------------------
+ * Update README
+
+v8.1.23 (2023-06-19)
+-------------------------
+ * Support Dialog360 Cloud API channels
+
+v8.1.22 (2023-06-05)
+-------------------------
+ * Stop writing ChannelLog.msg
+
+v8.1.21 (2023-05-25)
+-------------------------
+ * Use Basic auth for fetching BW media attachments
+
+v8.1.20 (2023-05-25)
+-------------------------
+ * Save received MO media for BW channels
+
+v8.1.19 (2023-05-24)
+-------------------------
+ * Use max_length from config for external channels
+
+v8.1.18 (2023-04-20)
+-------------------------
+ * Change default for FBA channels to messaging_type=UPDATE
+
+v8.1.17 (2023-04-20)
+-------------------------
+ * Use origin and contact last seen on to determine message type and tag for FBA channels
+ * Use postgres and redis as services in github actions
+
+v8.1.16 (2023-04-18)
+-------------------------
+ * Update github actions versions
+ * Ignore dates for hormund mo as they're not reliable or accurate
+ * Remove chikka handler (company no longer exists)
+
+v8.1.15 (2023-04-17)
+-------------------------
+ * Remove JSON tags for msg fields not used in sending
+
+v8.1.14 (2023-04-17)
+-------------------------
+ * Address the expired status for MTN msgs
+ * Update test database credentials for consistency with other projects
+
+v8.1.13 (2023-03-29)
+-------------------------
+ * Fetch attachments endpoint should return connection errors as unavailable attachments
+
+v8.1.12 (2023-03-24)
+-------------------------
+ * Fix MTN status report payload
+
+v8.1.11 (2023-03-22)
+-------------------------
+ * MTN status reports are sent to the MO callback URL
+
+v8.1.10 (2023-03-20)
+-------------------------
+ * Add way to customize the API host for MTN channels in channel config
+ * Convert more handlers to use JSONPayload wrapper
+
+v8.1.9 (2023-03-17)
+-------------------------
+ * Fix config for MTN channel for getting token and setting expiration
+ * Add generic JSON handler wrapper that takes care of decoding and validaing incoming JSON payloads
+
+v8.1.8 (2023-03-16)
+-------------------------
+ * Add support for MTN Developer Portal channel
+
+v8.1.7 (2023-03-14)
+-------------------------
+ * Remove recipient_id requirements on statuses part of payload
+ * Reduce time allowed for attachment requests so that we return before server cancels us
+ * Test with org and channel configs as non-null JSONB columns
+
+v8.1.6 (2023-03-08)
+-------------------------
+ * Create messages with msg_type=T
+ * Bump golang.org/x/net from 0.2.0 to 0.7.0
+ * Switch to gocommon/uuids for UUID types
+
+v8.1.5 (2023-02-02)
+-------------------------
+ * Read quick_replies from msg field instead of inside metadata
+
+v8.1.4 (2023-02-01)
+-------------------------
+ * Update to v2 of nyaruka/null
+
+v8.1.3 (2023-01-31)
+-------------------------
+ * Add support for localizing Menu header on facebook list messages
+
+v8.1.2 (2023-01-30)
+-------------------------
+ * Use Msg.locale with on-prem WhatsApp channels too
+
+v8.1.1 (2023-01-30)
+-------------------------
+ * Support reading msg locale and use that instead of language+country on templating
+
+v8.1.0 (2023-01-23)
+-------------------------
+ * Remove passing the parameters as null for WA template components
+
+v8.0.2 (2023-01-11)
+-------------------------
+ * Fix for BW handler not being loaded 
+
+v8.0.0 (2023-01-09)
+-------------------------
+ * Fix typos in README
+
 v7.5.66 (2023-01-09)
 -------------------------
  * Support bandwidth channel type

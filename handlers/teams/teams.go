@@ -43,7 +43,7 @@ func newHandler() courier.ChannelHandler {
 
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveEvent)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receiveEvent)
 	return nil
 }
 
@@ -196,8 +196,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 			}
 		}
 
-		ev := h.Backend().NewIncomingMsg(channel, urn, text, clog).WithExternalID(payload.ID).WithReceivedOn(date)
-		event := h.Backend().CheckExternalIDSeen(ev)
+		event := h.Backend().NewIncomingMsg(channel, urn, text, payload.ID, clog).WithReceivedOn(date)
 
 		// add any attachment URL found
 		for _, attURL := range attachmentURLs {
@@ -208,8 +207,6 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		if err != nil {
 			return nil, err
 		}
-
-		h.Backend().WriteExternalIDSeen(event)
 
 		events = append(events, event)
 		data = append(data, courier.NewMsgReceiveData(event))
@@ -353,7 +350,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 		attType, attURL := handlers.SplitAttachment(attachment)
 		filename, err := utils.BasePathForURL(attURL)
 		if err != nil {
-			logrus.WithField("channel_uuid", msg.Channel().UUID().String()).WithError(err).Error("Error while parsing the media URL")
+			logrus.WithField("channel_uuid", msg.Channel().UUID()).WithError(err).Error("Error while parsing the media URL")
 		}
 		payload.Attachments = append(payload.Attachments, mtAttachment{attType, attURL, filename})
 	}

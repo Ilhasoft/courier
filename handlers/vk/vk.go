@@ -89,7 +89,7 @@ func newHandler() courier.ChannelHandler {
 
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveEvent)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeUnknown, handlers.JSONPayload(h, h.receiveEvent))
 	return nil
 }
 
@@ -192,20 +192,7 @@ type mediaUploadInfoPayload struct {
 }
 
 // receiveEvent handles request event type
-func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
-	// read request body
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 100000))
-
-	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("unable to read request body: %s", err))
-	}
-	// restore body to its original value
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	payload := &moPayload{}
-
-	if err := json.Unmarshal(bodyBytes, payload); err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-	}
+func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	// check shared secret key before proceeding
 	secret := channel.StringConfigForKey(courier.ConfigSecret, "")
 
@@ -215,9 +202,13 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 	// check event type and decode body to correspondent struct
 	switch payload.Type {
 	case eventTypeServerVerification:
+		clog.SetType(courier.ChannelLogTypeWebhookVerify)
+
 		return h.verifyServer(channel, w)
 
 	case eventTypeNewMessage:
+		clog.SetType(courier.ChannelLogTypeMsgReceive)
+
 		newMessage := &moNewMessagePayload{}
 
 		if err := handlers.DecodeAndValidateJSON(newMessage, r); err != nil {
@@ -250,25 +241,23 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	date := time.Unix(payload.Object.Message.Date, 0).UTC()
 	text := payload.Object.Message.Text
 	externalId := strconv.FormatInt(payload.Object.Message.Id, 10)
-	msg := h.Backend().NewIncomingMsg(channel, urn, text, clog).WithReceivedOn(date).WithExternalID(externalId)
-	event := h.Backend().CheckExternalIDSeen(msg)
+	msg := h.Backend().NewIncomingMsg(channel, urn, text, externalId, clog).WithReceivedOn(date)
 
 	if attachment := takeFirstAttachmentUrl(*payload); attachment != "" {
-		event.WithAttachment(attachment)
+		msg.WithAttachment(attachment)
 	}
 	// check for empty content
-	if event.Text() == "" && len(event.Attachments()) == 0 {
+	if msg.Text() == "" && len(msg.Attachments()) == 0 {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("no text or attachment"))
 	}
 	// save message to our backend
-	if err := h.Backend().WriteMsg(ctx, event, clog); err != nil {
+	if err := h.Backend().WriteMsg(ctx, msg, clog); err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
-	h.Backend().WriteExternalIDSeen(event)
 	// write required response
 	_, err = fmt.Fprint(w, responseIncomingMessage)
 
-	return []courier.Event{event}, err
+	return []courier.Event{msg}, err
 }
 
 // DescribeURN handles VK contact details

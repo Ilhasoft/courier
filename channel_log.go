@@ -23,9 +23,11 @@ const (
 	ChannelLogTypeMsgStatus       ChannelLogType = "msg_status"
 	ChannelLogTypeMsgReceive      ChannelLogType = "msg_receive"
 	ChannelLogTypeEventReceive    ChannelLogType = "event_receive"
+	ChannelLogTypeMultiReceive    ChannelLogType = "multi_receive"
 	ChannelLogTypeAttachmentFetch ChannelLogType = "attachment_fetch"
 	ChannelLogTypeTokenRefresh    ChannelLogType = "token_refresh"
 	ChannelLogTypePageSubscribe   ChannelLogType = "page_subscribe"
+	ChannelLogTypeWebhookVerify   ChannelLogType = "webhook_verify"
 )
 
 type ChannelError struct {
@@ -110,8 +112,8 @@ type ChannelLog struct {
 
 // NewChannelLogForIncoming creates a new channel log for an incoming request, the type of which won't be known
 // until the handler completes.
-func NewChannelLogForIncoming(ch Channel, r *httpx.Recorder, redactVals []string) *ChannelLog {
-	return newChannelLog(ChannelLogTypeUnknown, ch, r, NilMsgID, redactVals)
+func NewChannelLogForIncoming(logType ChannelLogType, ch Channel, r *httpx.Recorder, redactVals []string) *ChannelLog {
+	return newChannelLog(logType, ch, r, NilMsgID, redactVals)
 }
 
 // NewChannelLogForSend creates a new channel log for a message send
@@ -134,8 +136,8 @@ func newChannelLog(t ChannelLogType, ch Channel, r *httpx.Recorder, mid MsgID, r
 		uuid:      ChannelLogUUID(uuids.New()),
 		type_:     t,
 		channel:   ch,
-		recorder:  r,
 		msgID:     mid,
+		recorder:  r,
 		createdOn: dates.Now(),
 
 		redactor: stringsx.NewRedactor("**********", redactVals...),
@@ -203,6 +205,21 @@ func (l *ChannelLog) CreatedOn() time.Time {
 
 func (l *ChannelLog) Elapsed() time.Duration {
 	return l.elapsed
+}
+
+// if we have an error or a non 2XX/3XX http response then log is considered an error
+func (l *ChannelLog) IsError() bool {
+	if len(l.errors) > 0 {
+		return true
+	}
+
+	for _, l := range l.httpLogs {
+		if l.StatusCode < 200 || l.StatusCode >= 400 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (l *ChannelLog) traceToLog(t *httpx.Trace) *httpx.Log {

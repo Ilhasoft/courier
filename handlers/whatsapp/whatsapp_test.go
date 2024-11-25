@@ -324,7 +324,6 @@ var validStatus = `
 {
   "statuses": [{
     "id": "9712A34B4A8B6AD50F",
-    "recipient_id": "16315555555",
     "status": "sent",
     "timestamp": "1518694700"
   }]
@@ -334,7 +333,6 @@ var invalidStatus = `
 {
   "statuses": [{
     "id": "9712A34B4A8B6AD50F",
-    "recipient_id": "16315555555",
     "status": "in_orbit",
     "timestamp": "1518694700"
   }]
@@ -344,7 +342,6 @@ var ignoreStatus = `
 {
   "statuses": [{
     "id": "9712A34B4A8B6AD50F",
-    "recipient_id": "16315555555",
     "status": "deleted",
     "timestamp": "1518694700"
   }]
@@ -554,7 +551,7 @@ var waTestCases = []ChannelHandleTestCase{
 	},
 }
 
-func TestBuildMediaRequest(t *testing.T) {
+func TestBuildAttachmentRequest(t *testing.T) {
 	mb := test.NewMockBackend()
 
 	waHandler := &handler{NewBaseHandler(courier.ChannelType("WA"), "WhatsApp")}
@@ -770,7 +767,8 @@ var defaultSendTestCases = []ChannelSendTestCase{
 		Label:               "Template Send",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "variables": ["Chef", "tomorrow"]}}`),
+		MsgLocale:           "eng",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"to":"250788123123","type":"template","template":{"namespace":"waba_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -779,10 +777,24 @@ var defaultSendTestCases = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
+		Label:               "Template Send no variables",
+		MsgText:             "templated message",
+		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "eng",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": []}}`),
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  200,
+		ExpectedRequestBody: `{"to":"250788123123","type":"template","template":{"namespace":"waba_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body"}]}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
+	},
+	{
 		Label:               "Template Country Language",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
+		MsgLocale:           "eng-US",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"to":"250788123123","type":"template","template":{"namespace":"waba_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -794,7 +806,8 @@ var defaultSendTestCases = []ChannelSendTestCase{
 		Label:               "Template Namespace",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "namespace": "wa_template_namespace", "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
+		MsgLocale:           "eng-US",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "namespace": "wa_template_namespace", "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"to":"250788123123","type":"template","template":{"namespace":"wa_template_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -833,11 +846,17 @@ var defaultSendTestCases = []ChannelSendTestCase{
 		SendPrep: setSendURL,
 	},
 	{
-		Label:          "Template Invalid Language",
-		MsgText:        "templated message",
-		MsgURN:         "whatsapp:250788123123",
-		ExpectedErrors: []*courier.ChannelError{courier.NewChannelError("", "", `unable to decode template: {"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}} for channel: 8eb23e93-5ecb-45ba-b726-3b064e0c56ab: unable to find mapping for language: bnt`)},
-		MsgMetadata:    json.RawMessage(`{"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}}`),
+		Label:               "Template Invalid Language",
+		MsgText:             "templated message",
+		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "bnt",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  200,
+		ExpectedRequestBody: `{"to":"250788123123","type":"template","template":{"namespace":"waba_namespace","name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
 	},
 	{
 		Label:   "WhatsApp Contact Error",
@@ -1208,4 +1227,16 @@ func TestSending(t *testing.T) {
 	mediaCacheSendTestCases := mockAttachmentURLs(mediaServer, mediaCacheSendTestCases)
 
 	RunChannelSendTestCases(t, defaultChannel, newWAHandler(courier.ChannelType("WA"), "WhatsApp"), mediaCacheSendTestCases, []string{"token123"}, nil)
+}
+
+func TestGetSupportedLanguage(t *testing.T) {
+	assert.Equal(t, "en", getSupportedLanguage(courier.NilLocale))
+	assert.Equal(t, "en", getSupportedLanguage(courier.Locale("eng")))
+	assert.Equal(t, "en_US", getSupportedLanguage(courier.Locale("eng-US")))
+	assert.Equal(t, "pt_PT", getSupportedLanguage(courier.Locale("por")))
+	assert.Equal(t, "pt_PT", getSupportedLanguage(courier.Locale("por-PT")))
+	assert.Equal(t, "pt_BR", getSupportedLanguage(courier.Locale("por-BR")))
+	assert.Equal(t, "fil", getSupportedLanguage(courier.Locale("fil")))
+	assert.Equal(t, "fr", getSupportedLanguage(courier.Locale("fra-CA")))
+	assert.Equal(t, "en", getSupportedLanguage(courier.Locale("run")))
 }

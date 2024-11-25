@@ -53,10 +53,10 @@ func newHandler() courier.ChannelHandler {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodGet, "", h.VerifyURL)
-	s.AddHandlerRoute(h, http.MethodPost, "rcv/msg/message", h.receiveMessage)
-	s.AddHandlerRoute(h, http.MethodPost, "rcv/event/menu", h.receiveMessage)
-	s.AddHandlerRoute(h, http.MethodPost, "rcv/event/follow", h.receiveMessage)
+	s.AddHandlerRoute(h, http.MethodGet, "", courier.ChannelLogTypeWebhookVerify, h.VerifyURL)
+	s.AddHandlerRoute(h, http.MethodPost, "rcv/msg/message", courier.ChannelLogTypeMsgReceive, handlers.JSONPayload(h, h.receiveMessage))
+	s.AddHandlerRoute(h, http.MethodPost, "rcv/event/menu", courier.ChannelLogTypeEventReceive, handlers.JSONPayload(h, h.receiveMessage))
+	s.AddHandlerRoute(h, http.MethodPost, "rcv/event/follow", courier.ChannelLogTypeEventReceive, handlers.JSONPayload(h, h.receiveMessage))
 	return nil
 }
 
@@ -109,13 +109,7 @@ type moPayload struct {
 }
 
 // receiveMessage is our HTTP handler function for incoming messages
-func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
-	payload := &moPayload{}
-	err := handlers.DecodeAndValidateJSON(payload, r)
-	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-	}
-
+func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	if payload.MsgID == "" && payload.Event == "" {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("missing parameters, must have either 'MsgId' or 'Event'"))
 	}
@@ -144,7 +138,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our message
-	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Content, clog).WithExternalID(payload.MsgID).WithReceivedOn(date)
+	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Content, payload.MsgID, clog).WithReceivedOn(date)
 	if payload.MsgType == "image" || payload.MsgType == "video" || payload.MsgType == "voice" {
 		mediaURL := buildMediaURL(payload.MediaID)
 		msg.WithAttachment(mediaURL)
@@ -261,7 +255,7 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 	rc := h.Backend().RedisPool().Get()
 	defer rc.Close()
 
-	tokenKey := fmt.Sprintf("channel-token:%s", channel.UUID().String())
+	tokenKey := fmt.Sprintf("channel-token:%s", channel.UUID())
 
 	h.fetchTokenMutex.Lock()
 	defer h.fetchTokenMutex.Unlock()

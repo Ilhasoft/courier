@@ -1,6 +1,7 @@
 package bandwidth
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/stretchr/testify/assert"
 )
 
 var testChannels = []courier.Channel{
@@ -186,6 +188,7 @@ var testCases = []ChannelHandleTestCase{
 		ExpectedBodyContains: "Accepted",
 		ExpectedMsgText:      Sp("hello world"),
 		ExpectedURN:          "tel:+12065551234",
+		ExpectedAttachments:  []string{"https://messaging.bandwidth.com/api/v2/users/{accountId}/media/14762070468292kw2fuqty55yp2b2/0/bw.png"},
 	},
 	{
 		Label:                "Invalid URN",
@@ -321,4 +324,13 @@ func TestSending(t *testing.T) {
 		map[string]interface{}{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1", configAccountID: "accound-id", configApplicationID: "application-id"})
 
 	RunChannelSendTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{httpx.BasicAuth("user1", "pass1")}, nil)
+}
+
+func TestBuildAttachmentRequest(t *testing.T) {
+	mb := test.NewMockBackend()
+
+	bwHandler := &handler{NewBaseHandler(courier.ChannelType("BW"), "Bandwidth")}
+	req, _ := bwHandler.BuildAttachmentRequest(context.Background(), mb, testChannels[0], "https://example.org/v1/media/41", nil)
+	assert.Equal(t, "https://example.org/v1/media/41", req.URL.String())
+	assert.Equal(t, "Basic dXNlcjE6cGFzczE=", req.Header.Get("Authorization"))
 }

@@ -28,7 +28,7 @@ func NewTelReceiveHandler(h courier.ChannelHandler, fromField string, bodyField 
 			return nil, WriteAndLogRequestError(ctx, h, c, w, r, err)
 		}
 		// build our msg
-		msg := h.Server().Backend().NewIncomingMsg(c, urn, body, clog).WithReceivedOn(time.Now().UTC())
+		msg := h.Server().Backend().NewIncomingMsg(c, urn, body, "", clog).WithReceivedOn(time.Now().UTC())
 		return WriteMsgsAndResponse(ctx, h, []courier.Msg{msg}, w, r, clog)
 	}
 }
@@ -55,5 +55,20 @@ func NewExternalIDStatusHandler(h courier.ChannelHandler, statuses map[string]co
 		// create our status
 		status := h.Server().Backend().NewMsgStatusForExternalID(c, externalID, sValue, clog)
 		return WriteMsgStatusAndResponse(ctx, h, c, status, w, r)
+	}
+}
+
+type JSONHandlerFunc[T any] func(context.Context, courier.Channel, http.ResponseWriter, *http.Request, *T, *courier.ChannelLog) ([]courier.Event, error)
+
+func JSONPayload[T any](h courier.ChannelHandler, handlerFunc JSONHandlerFunc[T]) courier.ChannelHandleFunc {
+	return func(ctx context.Context, c courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
+		payload := new(T)
+
+		err := DecodeAndValidateJSON(payload, r)
+		if err != nil {
+			return nil, WriteAndLogRequestError(ctx, h, c, w, r, err)
+		}
+
+		return handlerFunc(ctx, c, w, r, payload, clog)
 	}
 }
