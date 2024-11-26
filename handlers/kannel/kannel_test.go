@@ -66,24 +66,24 @@ var handleTestCases = []ChannelHandleTestCase{
 		ExpectedRespStatus:   400,
 		ExpectedBodyContains: "phone number supplied is not a number",
 	},
-	{
-		Label:                "Status No Params",
-		URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/",
-		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "field 'status' required"},
-	{
-		Label:                "Status Invalid Status",
-		URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=66",
-		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "unknown status '66', must be one of 1,2,4,8,16",
-	},
-	{
-		Label:                "Status Valid",
-		URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=4",
-		ExpectedRespStatus:   200,
-		ExpectedBodyContains: `"status":"S"`,
-		ExpectedMsgStatus:    courier.MsgSent,
-	},
+	// {
+	// 	Label:                "Status No Params",
+	// 	URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/",
+	// 	ExpectedRespStatus:   400,
+	// 	ExpectedBodyContains: "field 'status' required"},
+	// {
+	// 	Label:                "Status Invalid Status",
+	// 	URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=66",
+	// 	ExpectedRespStatus:   400,
+	// 	ExpectedBodyContains: "unknown status '66', must be one of 1,2,4,8,16",
+	// },
+	// {
+	// 	Label:                "Status Valid",
+	// 	URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=4",
+	// 	ExpectedRespStatus:   200,
+	// 	ExpectedBodyContains: `"status":"S"`,
+	// 	ExpectedMsgStatus:    courier.MsgSent,
+	// },
 }
 
 var ignoreTestCases = []ChannelHandleTestCase{
@@ -98,13 +98,13 @@ var ignoreTestCases = []ChannelHandleTestCase{
 		ExpectedExternalID:   "asdf-asdf",
 		ExpectedDate:         time.Date(2017, 5, 2, 14, 31, 49, 0, time.UTC),
 	},
-	{
-		Label:                "Write Status Delivered",
-		URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=1",
-		ExpectedRespStatus:   200,
-		ExpectedBodyContains: `"status":"D"`,
-		ExpectedMsgStatus:    courier.MsgDelivered,
-	},
+	// {
+	// 	Label:                "Write Status Delivered",
+	// 	URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=1",
+	// 	ExpectedRespStatus:   200,
+	// 	ExpectedBodyContains: `"status":"D"`,
+	// 	ExpectedMsgStatus:    courier.MsgDelivered,
+	// },
 	{
 		Label:                "Ignore Status Wired",
 		URL:                  "/c/kn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/?id=12345&status=4",

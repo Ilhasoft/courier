@@ -818,6 +818,7 @@ var defaultSendTestCases = []ChannelSendTestCase{
 	{
 		Label:   "Media Message Template Send - Image",
 		MsgText: "Media Message Msg", MsgURN: "whatsapp:250788123123",
+		MsgLocale:         "eng-US",
 		ExpectedMsgStatus: "W", ExpectedExternalID: "157b5e14568e8",
 		MsgMetadata:    json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "namespace": "wa_template_namespace", "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
 		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
@@ -833,6 +834,7 @@ var defaultSendTestCases = []ChannelSendTestCase{
 	{
 		Label:   "Media Message Template Send - Video",
 		MsgText: "Media Message Msg", MsgURN: "whatsapp:250788123123",
+		MsgLocale:         "eng-US",
 		ExpectedMsgStatus: "W", ExpectedExternalID: "157b5e14568e8",
 		MsgMetadata:    json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "namespace": "wa_template_namespace", "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
 		MsgAttachments: []string{"video/mp4:https://foo.bar/video.mp4"},
