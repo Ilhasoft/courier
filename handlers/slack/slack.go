@@ -153,32 +153,39 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 
 	status := h.Backend().NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgErrored, clog)
 
-	hasError := true
-
 	for _, attachment := range msg.Attachments() {
 		fileAttachment, err := parseAttachmentToFileParams(msg, attachment, clog)
-		hasError = err != nil
+		if err != nil {
+			clog.RawError(err)
+			return status, nil
+		}
 
 		if fileAttachment != nil {
 			err = sendFilePart(msg, botToken, fileAttachment, clog)
-			hasError = err != nil
+			if err != nil {
+				clog.RawError(err)
+				return status, nil
+			}
 		}
 	}
 
 	if len(msg.QuickReplies()) != 0 {
 		_, err := sendQuickReplies(msg, botToken, clog)
-		hasError = err != nil
+		if err != nil {
+			clog.RawError(err)
+			return status, nil
+		}
 	}
 
 	if msg.Text() != "" && len(msg.QuickReplies()) == 0 {
 		err := sendTextMsgPart(msg, botToken, clog)
-		hasError = err != nil
+		if err != nil {
+			clog.RawError(err)
+			return status, nil
+		}
 	}
 
-	if !hasError {
-		status.SetStatus(courier.MsgWired)
-	}
-
+	status.SetStatus(courier.MsgWired)
 	return status, nil
 }
 
