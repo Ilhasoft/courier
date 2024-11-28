@@ -2,6 +2,7 @@ package rapidpro
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,16 +23,13 @@ import (
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/dbutil/assertdb"
 	"github.com/nyaruka/gocommon/httpx"
-	"github.com/nyaruka/gocommon/storage"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
-	"github.com/nyaruka/null"
+	"github.com/nyaruka/null/v2"
 	"github.com/nyaruka/redisx/assertredis"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/suite"
 )
-
-const storageDir = "_test_storage"
 
 type BackendTestSuite struct {
 	suite.Suite
@@ -40,13 +38,15 @@ type BackendTestSuite struct {
 
 func testConfig() *courier.Config {
 	config := courier.NewConfig()
-	config.DB = "postgres://courier:courier@localhost:5432/courier_test?sslmode=disable"
+	config.DB = "postgres://courier_test:temba@localhost:5432/courier_test?sslmode=disable"
 	config.Redis = "redis://localhost:6379/0"
 	config.MediaDomain = "nyaruka.s3.com"
 	return config
 }
 
 func (ts *BackendTestSuite) SetupSuite() {
+	storageDir = "_test_storage"
+
 	// turn off logging
 	logrus.SetOutput(io.Discard)
 
@@ -78,10 +78,8 @@ func (ts *BackendTestSuite) SetupSuite() {
 	// clear redis
 	r := ts.b.redisPool.Get()
 	defer r.Close()
-	r.Do("FLUSHDB")
-
-	// use file storage instead of S3
-	ts.b.storage = storage.NewFS(storageDir, 0766)
+	_, err = r.Do("FLUSHDB")
+	ts.Require().NoError(err)
 }
 
 func (ts *BackendTestSuite) TearDownSuite() {
@@ -94,8 +92,7 @@ func (ts *BackendTestSuite) TearDownSuite() {
 }
 
 func (ts *BackendTestSuite) getChannel(cType string, cUUID string) *DBChannel {
-	channelUUID, err := courier.NewChannelUUID(cUUID)
-	ts.Require().NoError(err, "error building channel uuid")
+	channelUUID := courier.ChannelUUID(cUUID)
 
 	channel, err := ts.b.GetChannel(context.Background(), courier.ChannelType(cType), channelUUID)
 	ts.Require().NoError(err, "error getting channel")
@@ -106,16 +103,12 @@ func (ts *BackendTestSuite) getChannel(cType string, cUUID string) *DBChannel {
 
 func (ts *BackendTestSuite) TestMsgUnmarshal() {
 	msgJSON := `{
-		"status": "P",
-		"direction": "O",
 		"attachments": ["https://foo.bar/image.jpg"],
-		"queued_on": null,
+		"quick_replies": ["Yes", "No"],
 		"text": "Test message 21",
 		"contact_id": 30,
 		"contact_urn_id": 14,
-		"error_count": 0,
 		"flow": {"uuid": "9de3663f-c5c5-4c92-9f45-ecbc09abcc85", "name": "Favorites"},
-		"modified_on": "2017-07-21T19:22:23.254133Z",
 		"id": 204,
 		"channel_uuid": "f3ad3eb6-d00d-4dc3-92e9-9f34f32940ba",
 		"uuid": "54c893b9-b026-44fc-a490-50aed0361c3f",
@@ -124,43 +117,33 @@ func (ts *BackendTestSuite) TestMsgUnmarshal() {
 		"urn_auth": "5ApPVsFDcFt:RZdK9ne7LgfvBYdtCYg7tv99hC9P2",
 		"org_id": 1,
 		"created_on": "2017-07-21T19:22:23.242757Z",
-		"sent_on": null,
 		"high_priority": true,
-		"channel_id": 11,
 		"response_to_external_id": "external-id",
-		"external_id": null,
 		"is_resend": true,
-		"metadata": {"quick_replies": ["Yes", "No"], "topic": "event"}
+		"metadata": {"topic": "event"}
 	}`
 
 	msg := DBMsg{}
 	err := json.Unmarshal([]byte(msgJSON), &msg)
 	ts.NoError(err)
-	ts.Equal(msg.ChannelUUID_.String(), "f3ad3eb6-d00d-4dc3-92e9-9f34f32940ba")
-	ts.Equal(msg.ChannelID_, courier.NewChannelID(11))
+	ts.Equal(courier.ChannelUUID("f3ad3eb6-d00d-4dc3-92e9-9f34f32940ba"), msg.ChannelUUID_)
 	ts.Equal([]string{"https://foo.bar/image.jpg"}, msg.Attachments())
-	ts.Equal(msg.URNAuth_, "5ApPVsFDcFt:RZdK9ne7LgfvBYdtCYg7tv99hC9P2")
-	ts.Equal(msg.ExternalID(), "")
+	ts.Equal("5ApPVsFDcFt:RZdK9ne7LgfvBYdtCYg7tv99hC9P2", msg.URNAuth_)
+	ts.Equal("", msg.ExternalID())
 	ts.Equal([]string{"Yes", "No"}, msg.QuickReplies())
 	ts.Equal("event", msg.Topic())
 	ts.Equal("external-id", msg.ResponseToExternalID())
 	ts.True(msg.HighPriority())
 	ts.True(msg.IsResend())
 	flow_ref := courier.FlowReference{UUID: "9de3663f-c5c5-4c92-9f45-ecbc09abcc85", Name: "Favorites"}
-	ts.Equal(msg.Flow(), &flow_ref)
+	ts.Equal(&flow_ref, msg.Flow())
 	ts.Equal("Favorites", msg.FlowName())
 	ts.Equal("9de3663f-c5c5-4c92-9f45-ecbc09abcc85", msg.FlowUUID())
 
 	msgJSONNoQR := `{
-		"status": "P",
-		"direction": "O",
-		"attachments": ["https://foo.bar/image.jpg"],
-		"queued_on": null,
 		"text": "Test message 21",
 		"contact_id": 30,
 		"contact_urn_id": 14,
-		"error_count": 0,
-		"modified_on": "2017-07-21T19:22:23.254133Z",
 		"id": 204,
 		"channel_uuid": "f3ad3eb6-d00d-4dc3-92e9-9f34f32940ba",
 		"uuid": "54c893b9-b026-44fc-a490-50aed0361c3f",
@@ -168,18 +151,16 @@ func (ts *BackendTestSuite) TestMsgUnmarshal() {
 		"urn": "telegram:3527065",
 		"org_id": 1,
 		"created_on": "2017-07-21T19:22:23.242757Z",
-		"sent_on": null,
 		"high_priority": true,
-		"channel_id": 11,
 		"response_to_external_id": null,
-		"external_id": null,
 		"metadata": null
 	}`
 
 	msg = DBMsg{}
 	err = json.Unmarshal([]byte(msgJSONNoQR), &msg)
 	ts.NoError(err)
-	ts.Equal([]string{}, msg.QuickReplies())
+	ts.Nil(msg.Attachments())
+	ts.Nil(msg.QuickReplies())
 	ts.Equal("", msg.Topic())
 	ts.Equal("", msg.ResponseToExternalID())
 	ts.False(msg.IsResend())
@@ -193,15 +174,15 @@ func (ts *BackendTestSuite) TestCheckMsgExists() {
 	clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, knChannel, nil)
 
 	// check with invalid message id
-	err := checkMsgExists(ts.b, ts.b.NewMsgStatusForID(knChannel, courier.NewMsgID(-1), courier.MsgStatusValue("S"), clog))
+	err := checkMsgExists(ts.b, ts.b.NewMsgStatusForID(knChannel, -1, courier.MsgStatusValue("S"), clog))
 	ts.Equal(err, courier.ErrMsgNotFound)
 
 	// check with valid message id
-	err = checkMsgExists(ts.b, ts.b.NewMsgStatusForID(knChannel, courier.NewMsgID(10000), courier.MsgStatusValue("S"), clog))
+	err = checkMsgExists(ts.b, ts.b.NewMsgStatusForID(knChannel, 10000, courier.MsgStatusValue("S"), clog))
 	ts.Nil(err)
 
 	// only outgoing messages are matched
-	err = checkMsgExists(ts.b, ts.b.NewMsgStatusForID(knChannel, courier.NewMsgID(10002), courier.MsgStatusValue("S"), clog))
+	err = checkMsgExists(ts.b, ts.b.NewMsgStatusForID(knChannel, 10002, courier.MsgStatusValue("S"), clog))
 	ts.Equal(err, courier.ErrMsgNotFound)
 
 	// check with invalid external id
@@ -231,7 +212,7 @@ func (ts *BackendTestSuite) TestDeleteMsgWithExternalID() {
 	err = ts.b.DeleteMsgWithExternalID(ctx, knChannel, "ext1")
 	ts.Nil(err)
 
-	m := readMsgFromDB(ts.b, courier.NewMsgID(10000))
+	m := readMsgFromDB(ts.b, 10000)
 	ts.Equal(m.Text_, "test message")
 	ts.Equal(len(m.Attachments()), 0)
 	ts.Equal(m.Visibility_, MsgVisibility("V"))
@@ -240,7 +221,7 @@ func (ts *BackendTestSuite) TestDeleteMsgWithExternalID() {
 	err = ts.b.DeleteMsgWithExternalID(ctx, knChannel, "ext2")
 	ts.Nil(err)
 
-	m = readMsgFromDB(ts.b, courier.NewMsgID(10002))
+	m = readMsgFromDB(ts.b, 10002)
 	ts.Equal(m.Text_, "")
 	ts.Equal(len(m.Attachments()), 0)
 	ts.Equal(m.Visibility_, MsgVisibility("X"))
@@ -281,7 +262,7 @@ func (ts *BackendTestSuite) TestContact() {
 	ts.NotNil(contact)
 
 	ts.Equal(null.String(""), contact.Name_)
-	ts.Equal("a984069d-0008-4d8c-a772-b14a8a6acccc", contact.UUID_.String())
+	ts.Equal(courier.ContactUUID("a984069d-0008-4d8c-a772-b14a8a6acccc"), contact.UUID_)
 
 	urn, _ = urns.NewTelURNForCountry("12065551519", "US")
 
@@ -650,7 +631,7 @@ func (ts *BackendTestSuite) TestMsgStatus() {
 
 	time.Sleep(time.Second) // give committer time to write this
 
-	m = readMsgFromDB(ts.b, courier.NewMsgID(10000))
+	m = readMsgFromDB(ts.b, 10000)
 	ts.Equal(m.Status_, courier.MsgErrored)
 	ts.Equal(m.ErrorCount_, 1)
 	ts.True(m.ModifiedOn_.After(now))
@@ -664,7 +645,7 @@ func (ts *BackendTestSuite) TestMsgStatus() {
 
 	time.Sleep(time.Second) // give committer time to write this
 
-	m = readMsgFromDB(ts.b, courier.NewMsgID(10000))
+	m = readMsgFromDB(ts.b, 10000)
 	ts.Equal(m.Status_, courier.MsgErrored)
 	ts.Equal(m.ErrorCount_, 2)
 	ts.Equal(null.NullString, m.FailedReason_)
@@ -676,7 +657,7 @@ func (ts *BackendTestSuite) TestMsgStatus() {
 	time.Sleep(time.Second) // give committer time to write this
 
 	ts.NoError(err)
-	m = readMsgFromDB(ts.b, courier.NewMsgID(10000))
+	m = readMsgFromDB(ts.b, 10000)
 	ts.Equal(m.Status_, courier.MsgFailed)
 	ts.Equal(m.ErrorCount_, 3)
 	ts.Equal(null.String("E"), m.FailedReason_)
@@ -756,39 +737,39 @@ func (ts *BackendTestSuite) TestHeartbeat() {
 	ts.NoError(ts.b.Heartbeat())
 }
 
-func (ts *BackendTestSuite) TestDupes() {
+func (ts *BackendTestSuite) TestCheckForDuplicate() {
 	r := ts.b.redisPool.Get()
 	defer r.Close()
 
 	ctx := context.Background()
 	knChannel := ts.getChannel("KN", "dbc126ed-66bc-4e28-b67b-81dc3327c95d")
-	clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, knChannel, nil)
+	twChannel := ts.getChannel("TW", "dbc126ed-66bc-4e28-b67b-81dc3327c96a")
 	urn, _ := urns.NewTelURNForCountry("12065551215", knChannel.Country())
+	urn2, _ := urns.NewTelURNForCountry("12065551277", knChannel.Country())
 
-	msg := ts.b.NewIncomingMsg(knChannel, urn, "ping", clog).(*DBMsg)
-	err := ts.b.WriteMsg(ctx, msg, clog)
-	ts.NoError(err)
+	createAndWriteMsg := func(ch courier.Channel, u urns.URN, text, extID string) *DBMsg {
+		clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, knChannel, nil)
+		m := ts.b.NewIncomingMsg(ch, u, text, extID, clog).(*DBMsg)
+		err := ts.b.WriteMsg(ctx, m, clog)
+		ts.NoError(err)
+		return m
+	}
 
-	// grab our UUID
-	uuid1 := msg.UUID().String()
+	msg1 := createAndWriteMsg(knChannel, urn, "ping", "")
+	ts.False(msg1.alreadyWritten)
 
 	// trying again should lead to same UUID
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "ping", clog).(*DBMsg)
-	err = ts.b.WriteMsg(ctx, msg, clog)
-	ts.NoError(err)
+	msg2 := createAndWriteMsg(knChannel, urn, "ping", "")
+	ts.Equal(msg1.UUID(), msg2.UUID())
+	ts.True(msg2.alreadyWritten)
 
-	ts.Equal(uuid1, msg.UUID().String())
-
-	// different message should change that
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "test", clog).(*DBMsg)
-	err = ts.b.WriteMsg(ctx, msg, clog)
-	ts.NoError(err)
-
-	ts.NotEqual(uuid1, msg.UUID().String())
-	uuid2 := msg.UUID().String()
+	// different text should change that
+	msg3 := createAndWriteMsg(knChannel, urn, "test", "")
+	ts.NotEqual(msg2.UUID(), msg3.UUID())
+	ts.False(msg3.alreadyWritten)
 
 	// an outgoing message should clear things
-	dbMsg := readMsgFromDB(ts.b, courier.NewMsgID(10000))
+	dbMsg := readMsgFromDB(ts.b, 10000)
 	dbMsg.URN_ = urn
 	dbMsg.channel = knChannel
 	dbMsg.ChannelUUID_ = knChannel.UUID()
@@ -796,39 +777,33 @@ func (ts *BackendTestSuite) TestDupes() {
 
 	msgJSON, err := json.Marshal([]interface{}{dbMsg})
 	ts.NoError(err)
-
 	err = queue.PushOntoQueue(r, msgQueueName, "dbc126ed-66bc-4e28-b67b-81dc3327c95d", 10, string(msgJSON), queue.HighPriority)
 	ts.NoError(err)
-
 	_, err = ts.b.PopNextOutgoingMsg(ctx)
 	ts.NoError(err)
 
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "test", clog).(*DBMsg)
-	err = ts.b.WriteMsg(ctx, msg, clog)
-	ts.NoError(err)
+	msg4 := createAndWriteMsg(knChannel, urn, "test", "")
+	ts.NotEqual(msg3.UUID(), msg4.UUID())
 
-	ts.NotEqual(uuid2, msg.UUID().String())
-}
+	// message on a different channel but same text won't be considered a dupe
+	msg5 := createAndWriteMsg(twChannel, urn, "test", "")
+	ts.NotEqual(msg4.UUID(), msg5.UUID())
 
-func (ts *BackendTestSuite) TestExternalIDDupes() {
-	r := ts.b.redisPool.Get()
-	defer r.Close()
+	// message on a different URN but same text won't be considered a dupe
+	msg6 := createAndWriteMsg(twChannel, urn2, "test", "")
+	ts.NotEqual(msg5.UUID(), msg6.UUID())
 
-	knChannel := ts.getChannel("KN", "dbc126ed-66bc-4e28-b67b-81dc3327c95d")
-	clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, knChannel, nil)
-	urn, _ := urns.NewTelURNForCountry("12065551215", knChannel.Country())
+	// when messages have external IDs those are used to de-dupe and text is ignored
+	msg7 := createAndWriteMsg(twChannel, urn, "test", "EX123")
+	msg8 := createAndWriteMsg(twChannel, urn, "testtest", "EX123")
+	msg9 := createAndWriteMsg(twChannel, urn, "test", "EX234")
 
-	msg := newMsg(MsgIncoming, knChannel, urn, "ping", clog)
+	ts.Equal(msg7.UUID(), msg8.UUID())
+	ts.NotEqual(msg7.UUID(), msg9.UUID())
 
-	var checkedMsg = ts.b.CheckExternalIDSeen(msg)
-	m := checkedMsg.(*DBMsg)
-	ts.False(m.alreadyWritten)
-
-	ts.b.WriteExternalIDSeen(msg)
-
-	checkedMsg = ts.b.CheckExternalIDSeen(msg)
-	m2 := checkedMsg.(*DBMsg)
-	ts.True(m2.alreadyWritten)
+	ts.False(msg7.alreadyWritten)
+	ts.True(msg8.alreadyWritten)
+	ts.False(msg9.alreadyWritten)
 }
 
 func (ts *BackendTestSuite) TestStatus() {
@@ -839,8 +814,8 @@ func (ts *BackendTestSuite) TestStatus() {
 	r := ts.b.redisPool.Get()
 	defer r.Close()
 
-	dbMsg := readMsgFromDB(ts.b, courier.NewMsgID(10000))
-	dbMsg.ChannelUUID_, _ = courier.NewChannelUUID("dbc126ed-66bc-4e28-b67b-81dc3327c95d")
+	dbMsg := readMsgFromDB(ts.b, 10000)
+	dbMsg.ChannelUUID_ = courier.ChannelUUID("dbc126ed-66bc-4e28-b67b-81dc3327c95d")
 	ts.NotNil(dbMsg)
 
 	// serialize our message
@@ -860,8 +835,8 @@ func (ts *BackendTestSuite) TestOutgoingQueue() {
 	r := ts.b.redisPool.Get()
 	defer r.Close()
 
-	dbMsg := readMsgFromDB(ts.b, courier.NewMsgID(10000))
-	dbMsg.ChannelUUID_, _ = courier.NewChannelUUID("dbc126ed-66bc-4e28-b67b-81dc3327c95d")
+	dbMsg := readMsgFromDB(ts.b, 10000)
+	dbMsg.ChannelUUID_ = courier.ChannelUUID("dbc126ed-66bc-4e28-b67b-81dc3327c95d")
 	ts.NotNil(dbMsg)
 
 	// serialize our message
@@ -898,7 +873,7 @@ func (ts *BackendTestSuite) TestOutgoingQueue() {
 	ts.Nil(err)
 
 	// checking another message should show unsent
-	msg3 := readMsgFromDB(ts.b, courier.NewMsgID(10001))
+	msg3 := readMsgFromDB(ts.b, 10001)
 	sent, err = ts.b.WasMsgSent(ctx, msg3.ID())
 	ts.NoError(err)
 	ts.False(sent)
@@ -982,8 +957,8 @@ func (ts *BackendTestSuite) TestChannel() {
 func (ts *BackendTestSuite) TestGetChannel() {
 	ctx := context.Background()
 
-	knUUID, _ := courier.NewChannelUUID("dbc126ed-66bc-4e28-b67b-81dc3327c95d")
-	xxUUID, _ := courier.NewChannelUUID("0a1256fe-c6e4-494d-99d3-576286f31d3b") // doesn't exist
+	knUUID := courier.ChannelUUID("dbc126ed-66bc-4e28-b67b-81dc3327c95d")
+	xxUUID := courier.ChannelUUID("0a1256fe-c6e4-494d-99d3-576286f31d3b") // doesn't exist
 
 	ch, err := ts.b.GetChannel(ctx, courier.ChannelType("KN"), knUUID)
 	ts.Assert().NoError(err)
@@ -1026,18 +1001,68 @@ func (ts *BackendTestSuite) TestWriteChanneLog() {
 	trace, err := httpx.DoTrace(http.DefaultClient, req, nil, nil, 0)
 	ts.NoError(err)
 
-	clog := courier.NewChannelLog(courier.ChannelLogTypeTokenRefresh, channel, nil)
-	clog.HTTP(trace)
-	clog.Error(courier.ErrorResponseStatusCode())
+	clog1 := courier.NewChannelLog(courier.ChannelLogTypeTokenRefresh, channel, nil)
+	clog1.HTTP(trace)
+	clog1.Error(courier.ErrorResponseStatusCode())
 
-	err = ts.b.WriteChannelLog(ctx, clog)
+	// log isn't attached to a message so will be written to the database
+	err = ts.b.WriteChannelLog(ctx, clog1)
 	ts.NoError(err)
 
-	time.Sleep(time.Second) // give committer time to write this
+	time.Sleep(time.Second) // give writer time to write this
 
 	assertdb.Query(ts.T(), ts.b.db, `SELECT count(*) FROM channels_channellog`).Returns(1)
 	assertdb.Query(ts.T(), ts.b.db, `SELECT channel_id, http_logs->0->>'url' AS url, errors->0->>'message' AS err FROM channels_channellog`).
 		Columns(map[string]interface{}{"channel_id": int64(channel.ID()), "url": "https://api.messages.com/send.json", "err": "Unexpected response status code."})
+
+	clog2 := courier.NewChannelLog(courier.ChannelLogTypeMsgSend, channel, nil)
+	clog2.HTTP(trace)
+	clog2.SetMsgID(1234)
+
+	// log is attached to a message so will be written to storage
+	err = ts.b.WriteChannelLog(ctx, clog2)
+	ts.NoError(err)
+
+	time.Sleep(time.Second) // give writer time to write this
+
+	_, body, err := ts.b.logStorage.Get(context.Background(), fmt.Sprintf("channels/%s/%s/%s.json", channel.UUID(), clog2.UUID()[0:4], clog2.UUID()))
+	ts.NoError(err)
+	ts.Contains(string(body), "msg_send")
+	ts.Contains(string(body), "https://api.messages.com/send.json")
+
+	ts.b.db.MustExec(`DELETE FROM channels_channellog`)
+
+	// channel channel log policy to only write errors
+	channel.LogPolicy = LogPolicyErrors
+
+	clog3 := courier.NewChannelLog(courier.ChannelLogTypeMsgSend, channel, nil)
+	clog3.HTTP(trace)
+	ts.NoError(ts.b.WriteChannelLog(ctx, clog3))
+
+	time.Sleep(time.Second) // give writer time to.. not write this
+
+	assertdb.Query(ts.T(), ts.b.db, `SELECT count(*) FROM channels_channellog`).Returns(0)
+
+	clog4 := courier.NewChannelLog(courier.ChannelLogTypeMsgSend, channel, nil)
+	clog4.HTTP(trace)
+	clog4.Error(courier.ErrorResponseStatusCode())
+	ts.NoError(ts.b.WriteChannelLog(ctx, clog4))
+
+	time.Sleep(time.Second) // give writer time to write this because it's an error
+
+	assertdb.Query(ts.T(), ts.b.db, `SELECT count(*) FROM channels_channellog`).Returns(1)
+
+	// channel channel log policy to discard all
+	channel.LogPolicy = LogPolicyNone
+
+	clog5 := courier.NewChannelLog(courier.ChannelLogTypeMsgSend, channel, nil)
+	clog5.HTTP(trace)
+	clog5.Error(courier.ErrorResponseStatusCode())
+	ts.NoError(ts.b.WriteChannelLog(ctx, clog5))
+
+	time.Sleep(time.Second) // give writer time to.. not write this
+
+	assertdb.Query(ts.T(), ts.b.db, `SELECT count(*) FROM channels_channellog`).Returns(1)
 }
 
 func (ts *BackendTestSuite) TestSaveAttachment() {
@@ -1051,7 +1076,7 @@ func (ts *BackendTestSuite) TestSaveAttachment() {
 
 	newURL, err := ts.b.SaveAttachment(ctx, knChannel, "image/jpeg", testJPG, "jpg")
 	ts.NoError(err)
-	ts.Equal("_test_storage/media/1/c00e/5d67/c00e5d67-c275-4389-aded-7d8b151cbd5b.jpg", newURL)
+	ts.Equal("_test_storage/attachments/media/1/c00e/5d67/c00e5d67-c275-4389-aded-7d8b151cbd5b.jpg", newURL)
 }
 
 func (ts *BackendTestSuite) TestWriteMsg() {
@@ -1064,7 +1089,7 @@ func (ts *BackendTestSuite) TestWriteMsg() {
 
 	// create a new courier msg
 	urn, _ := urns.NewTelURNForCountry("12065551212", knChannel.Country())
-	msg := ts.b.NewIncomingMsg(knChannel, urn, "test123", clog).WithExternalID("ext123").WithReceivedOn(now).WithContactName("test contact").(*DBMsg)
+	msg := ts.b.NewIncomingMsg(knChannel, urn, "test123", "ext123", clog).WithReceivedOn(now).WithContactName("test contact").(*DBMsg)
 
 	// try to write it to our db
 	err := ts.b.WriteMsg(ctx, msg, clog)
@@ -1072,7 +1097,7 @@ func (ts *BackendTestSuite) TestWriteMsg() {
 
 	// creating the incoming msg again should give us the same UUID and have the msg set as not to write
 	time.Sleep(1 * time.Second)
-	msg2 := ts.b.NewIncomingMsg(knChannel, urn, "test123", clog).(*DBMsg)
+	msg2 := ts.b.NewIncomingMsg(knChannel, urn, "test123", "ext123", clog).(*DBMsg)
 	ts.Equal(msg2.UUID(), msg.UUID())
 	ts.True(msg2.alreadyWritten)
 
@@ -1121,17 +1146,17 @@ func (ts *BackendTestSuite) TestWriteMsg() {
 
 	// waiting 5 seconds should let us write it successfully
 	time.Sleep(5 * time.Second)
-	msg3 := ts.b.NewIncomingMsg(knChannel, urn, "test123", clog).(*DBMsg)
+	msg3 := ts.b.NewIncomingMsg(knChannel, urn, "test123", "", clog).(*DBMsg)
 	ts.NotEqual(msg3.UUID(), msg.UUID())
 
 	// msg with null bytes in it, that's fine for a request body
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "test456\x00456", clog).WithExternalID("ext456").(*DBMsg)
+	msg = ts.b.NewIncomingMsg(knChannel, urn, "test456\x00456", "ext456", clog).(*DBMsg)
 	err = writeMsgToDB(ctx, ts.b, msg, clog)
 	ts.NoError(err)
 
 	// more null bytes
 	text, _ := url.PathUnescape("%1C%00%00%00%00%00%07%E0%00")
-	msg = ts.b.NewIncomingMsg(knChannel, urn, text, clog).(*DBMsg)
+	msg = ts.b.NewIncomingMsg(knChannel, urn, text, "", clog).(*DBMsg)
 	err = writeMsgToDB(ctx, ts.b, msg, clog)
 	ts.NoError(err)
 
@@ -1140,7 +1165,7 @@ func (ts *BackendTestSuite) TestWriteMsg() {
 	defer rc.Close()
 	rc.Do("DEL", "handler:1", "handler:active", fmt.Sprintf("c:1:%d", msg.ContactID_))
 
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "hello 1 2 3", clog).(*DBMsg)
+	msg = ts.b.NewIncomingMsg(knChannel, urn, "hello 1 2 3", "", clog).(*DBMsg)
 	err = writeMsgToDB(ctx, ts.b, msg, clog)
 	ts.NoError(err)
 
@@ -1168,7 +1193,7 @@ func (ts *BackendTestSuite) TestWriteMsg() {
 		"org_id":          float64(1),
 		"channel_id":      float64(10),
 		"msg_id":          float64(msg.ID_),
-		"msg_uuid":        msg.UUID_.String(),
+		"msg_uuid":        string(msg.UUID()),
 		"msg_external_id": msg.ExternalID(),
 		"urn":             msg.URN().String(),
 		"urn_id":          float64(msg.ContactURNID_),
@@ -1188,7 +1213,7 @@ func (ts *BackendTestSuite) TestWriteMsgWithAttachments() {
 	clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, knChannel, nil)
 	urn, _ := urns.NewTelURNForCountry("12065551218", knChannel.Country())
 
-	msg := ts.b.NewIncomingMsg(knChannel, urn, "two regular attachments", clog).(*DBMsg)
+	msg := ts.b.NewIncomingMsg(knChannel, urn, "two regular attachments", "", clog).(*DBMsg)
 	msg.WithAttachment("http://example.com/test.jpg")
 	msg.WithAttachment("http://example.com/test.m4a")
 
@@ -1198,23 +1223,23 @@ func (ts *BackendTestSuite) TestWriteMsgWithAttachments() {
 	ts.Equal([]string{"http://example.com/test.jpg", "http://example.com/test.m4a"}, msg.Attachments())
 
 	// try an embedded attachment
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "embedded attachment data", clog).(*DBMsg)
+	msg = ts.b.NewIncomingMsg(knChannel, urn, "embedded attachment data", "", clog).(*DBMsg)
 	msg.WithAttachment(fmt.Sprintf("data:%s", base64.StdEncoding.EncodeToString(test.ReadFile("../../test/testdata/test.jpg"))))
 
 	// should have actually fetched and saved it to storage, with the correct content type
 	err = ts.b.WriteMsg(ctx, msg, clog)
 	ts.NoError(err)
-	ts.Equal([]string{"image/jpeg:_test_storage/media/1/547d/eaf7/547deaf7-7620-4434-95b3-58675999c4b7.jpg"}, msg.Attachments())
+	ts.Equal([]string{"image/jpeg:_test_storage/attachments/media/1/9b95/5e36/9b955e36-ac16-4c6b-8ab6-9b9af5cd042a.jpg"}, msg.Attachments())
 
 	// try an invalid embedded attachment
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "invalid embedded attachment data", clog).(*DBMsg)
+	msg = ts.b.NewIncomingMsg(knChannel, urn, "invalid embedded attachment data", "", clog).(*DBMsg)
 	msg.WithAttachment("data:34564363576573573")
 
 	err = ts.b.WriteMsg(ctx, msg, clog)
 	ts.EqualError(err, "unable to decode attachment data: illegal base64 data at input byte 16")
 
 	// try a geo attachment
-	msg = ts.b.NewIncomingMsg(knChannel, urn, "geo attachment", clog).(*DBMsg)
+	msg = ts.b.NewIncomingMsg(knChannel, urn, "geo attachment", "", clog).(*DBMsg)
 	msg.WithAttachment("geo:123.234,-45.676")
 
 	// should be saved as is
@@ -1232,7 +1257,7 @@ func (ts *BackendTestSuite) TestPreferredChannelCheckRole() {
 	now := time.Now().Round(time.Microsecond).In(time.UTC)
 
 	urn, _ := urns.NewTelURNForCountry("12065552020", exChannel.Country())
-	msg := ts.b.NewIncomingMsg(exChannel, urn, "test123", clog).WithExternalID("ext123").WithReceivedOn(now).WithContactName("test contact").(*DBMsg)
+	msg := ts.b.NewIncomingMsg(exChannel, urn, "test123", "ext123", clog).WithReceivedOn(now).WithContactName("test contact").(*DBMsg)
 
 	// try to write it to our db
 	err := ts.b.WriteMsg(ctx, msg, clog)
@@ -1273,7 +1298,7 @@ func (ts *BackendTestSuite) TestChannelEvent() {
 	dbE, err = readChannelEventFromDB(ts.b, dbE.ID_)
 	ts.NoError(err)
 	ts.Equal(dbE.EventType_, courier.Referral)
-	ts.Equal(map[string]interface{}{"ref_id": "12345"}, dbE.Extra_.Map())
+	ts.Equal(map[string]interface{}{"ref_id": "12345"}, dbE.Extra())
 	ts.Equal(contact.ID_, dbE.ContactID_)
 	ts.Equal(contact.URNID_, dbE.ContactURNID_)
 }
@@ -1317,7 +1342,7 @@ func (ts *BackendTestSuite) TestMailroomEvents() {
 	dbE, err = readChannelEventFromDB(ts.b, dbE.ID_)
 	ts.NoError(err)
 	ts.Equal(dbE.EventType_, courier.Referral)
-	ts.Equal(map[string]interface{}{"ref_id": "12345"}, dbE.Extra_.Map())
+	ts.Equal(map[string]interface{}{"ref_id": "12345"}, dbE.Extra())
 	ts.Equal(contact.ID_, dbE.ContactID_)
 	ts.Equal(contact.URNID_, dbE.ContactURNID_)
 
@@ -1423,8 +1448,8 @@ func (ts *BackendTestSuite) TestResolveMedia() {
 			},
 		},
 		{ // user entered unparseable URL
-			url: "::::",
-			err: "error parsing media URL: ::::",
+			url: ":xx",
+			err: "error parsing media URL: parse \":xx\": missing protocol scheme",
 		},
 	}
 
@@ -1495,4 +1520,27 @@ func readMsgFromDB(b *backend, id courier.MsgID) *DBMsg {
 
 	m.channel = ch
 	return m
+}
+
+const selectMsgIDForID = `
+SELECT m."id" FROM "msgs_msg" m INNER JOIN "channels_channel" c ON (m."channel_id" = c."id") WHERE (m."id" = $1 AND c."uuid" = $2 AND m."direction" = 'O')`
+
+const selectMsgIDForExternalID = `
+SELECT m."id" FROM "msgs_msg" m INNER JOIN "channels_channel" c ON (m."channel_id" = c."id") WHERE (m."external_id" = $1 AND c."uuid" = $2 AND m."direction" = 'O')`
+
+func checkMsgExists(b *backend, status courier.MsgStatus) (err error) {
+	var id int64
+
+	if status.ID() != courier.NilMsgID {
+		err = b.db.QueryRow(selectMsgIDForID, status.ID(), status.ChannelUUID()).Scan(&id)
+	} else if status.ExternalID() != "" {
+		err = b.db.QueryRow(selectMsgIDForExternalID, status.ExternalID(), status.ChannelUUID()).Scan(&id)
+	} else {
+		return fmt.Errorf("no id or external id for status update")
+	}
+
+	if err == sql.ErrNoRows {
+		return courier.ErrMsgNotFound
+	}
+	return err
 }

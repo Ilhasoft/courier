@@ -16,7 +16,8 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/queue"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/nyaruka/null"
+	"github.com/nyaruka/gocommon/uuids"
+	"github.com/nyaruka/null/v2"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	filetype "gopkg.in/h2non/filetype.v1"
@@ -86,31 +87,34 @@ func writeMsg(ctx context.Context, b *backend, msg courier.Msg, clog *courier.Ch
 
 	// fail? log
 	if err != nil {
-		logrus.WithError(err).WithField("msg", m.UUID().String()).Error("error writing to db")
+		logrus.WithError(err).WithField("msg", m.UUID()).Error("error writing to db")
 	}
 
 	// if we failed write to spool
 	if err != nil {
 		err = courier.WriteToSpool(b.config.SpoolDir, "msgs", m)
 	}
+
 	// mark this msg as having been seen
 	b.writeMsgSeen(m)
+
 	return err
 }
 
 // newMsg creates a new DBMsg object with the passed in parameters
-func newMsg(direction MsgDirection, channel courier.Channel, urn urns.URN, text string, clog *courier.ChannelLog) *DBMsg {
+func newMsg(direction MsgDirection, channel courier.Channel, urn urns.URN, text string, extID string, clog *courier.ChannelLog) *DBMsg {
 	now := time.Now()
 	dbChannel := channel.(*DBChannel)
 
 	return &DBMsg{
 		OrgID_:        dbChannel.OrgID(),
-		UUID_:         courier.NewMsgUUID(),
+		UUID_:         courier.MsgUUID(uuids.New()),
 		Direction_:    direction,
 		Status_:       courier.MsgPending,
 		Visibility_:   MsgVisible,
 		HighPriority_: false,
 		Text_:         text,
+		ExternalID_:   null.String(extID),
 
 		ChannelID_:   dbChannel.ID(),
 		ChannelUUID_: dbChannel.UUID(),
@@ -132,15 +136,15 @@ func newMsg(direction MsgDirection, channel courier.Channel, urn urns.URN, text 
 
 const sqlInsertMsg = `
 INSERT INTO
-	msgs_msg(org_id, uuid, direction, text, attachments, msg_count, error_count, high_priority, status,
+	msgs_msg(org_id, uuid, direction, text, attachments, msg_type, msg_count, error_count, high_priority, status,
              visibility, external_id, channel_id, contact_id, contact_urn_id, created_on, modified_on, next_attempt, queued_on, sent_on, log_uuids)
-    VALUES(:org_id, :uuid, :direction, :text, :attachments, :msg_count, :error_count, :high_priority, :status,
+    VALUES(:org_id, :uuid, :direction, :text, :attachments, 'T', :msg_count, :error_count, :high_priority, :status,
            :visibility, :external_id, :channel_id, :contact_id, :contact_urn_id, :created_on, :modified_on, :next_attempt, :queued_on, :sent_on, :log_uuids)
 RETURNING id`
 
 func writeMsgToDB(ctx context.Context, b *backend, m *DBMsg, clog *courier.ChannelLog) error {
 	// grab the contact for this msg
-	contact, err := contactForURN(ctx, b, m.OrgID_, m.channel, m.URN_, m.URNAuth_, m.ContactName_, clog)
+	contact, err := contactForURN(ctx, b, m.OrgID_, m.channel, m.URN_, m.URNAuth_, m.contactName, clog)
 
 	// our db is down, write to the spool, we will write/queue this later
 	if err != nil {
@@ -183,6 +187,7 @@ SELECT
 	direction,
 	text,
 	attachments,
+	quick_replies,
 	msg_count,
 	error_count,
 	failed_reason,
@@ -260,63 +265,61 @@ func (b *backend) flushMsgFile(filename string, contents []byte) error {
 // Deduping utility methods
 //-----------------------------------------------------------------------------
 
-// checkMsgSeen tries to look up whether a msg with the fingerprint passed in was seen in window or prevWindow. If
-// found returns the UUID of that msg, if not returns empty string
+// checks to see if this message has already been seen and if so returns its UUID
 func (b *backend) checkMsgSeen(msg *DBMsg) courier.MsgUUID {
 	rc := b.redisPool.Get()
 	defer rc.Close()
 
-	uuidAndText, _ := b.seenMsgs.Get(rc, msg.fingerprint(false))
+	// if we have an external id use that
+	if msg.ExternalID_ != "" {
+		fingerprint := fmt.Sprintf("%s|%s|%s", msg.Channel().UUID(), msg.URN().Identity(), msg.ExternalID())
 
-	// if so, test whether the text it the same
-	if uuidAndText != "" {
-		prevText := uuidAndText[37:]
+		uuid, _ := b.seenExternalIDs.Get(rc, fingerprint)
 
-		// if it is the same, return the UUID
-		if prevText == msg.Text() {
-			return courier.NewMsgUUIDFromString(uuidAndText[:36])
+		if uuid != "" {
+			return courier.MsgUUID(uuid)
+		}
+	} else {
+		// otherwise de-dup based on text received from that channel+urn since last send
+		fingerprint := fmt.Sprintf("%s|%s", msg.Channel().UUID(), msg.URN().Identity())
+
+		uuidAndText, _ := b.seenMsgs.Get(rc, fingerprint)
+
+		// if we have seen a message from this channel+urn check text too
+		if uuidAndText != "" {
+			prevText := uuidAndText[37:]
+
+			// if it is the same, return the UUID
+			if prevText == msg.Text() {
+				return courier.MsgUUID(uuidAndText[:36])
+			}
 		}
 	}
+
 	return courier.NilMsgUUID
 }
 
-// writeMsgSeen writes that the message with the passed in fingerprint and UUID was seen in the
-// passed in window
+// writeMsgSeen records that the given message has been seen and written to the database
 func (b *backend) writeMsgSeen(msg *DBMsg) {
 	rc := b.redisPool.Get()
 	defer rc.Close()
 
-	b.seenMsgs.Set(rc, msg.fingerprint(false), fmt.Sprintf("%s|%s", msg.UUID().String(), msg.Text()))
+	if msg.ExternalID_ != "" {
+		fingerprint := fmt.Sprintf("%s|%s|%s", msg.Channel().UUID(), msg.URN().Identity(), msg.ExternalID())
+
+		b.seenExternalIDs.Set(rc, fingerprint, string(msg.UUID()))
+	} else {
+		fingerprint := fmt.Sprintf("%s|%s", msg.Channel().UUID(), msg.URN().Identity())
+
+		b.seenMsgs.Set(rc, fingerprint, fmt.Sprintf("%s|%s", msg.UUID(), msg.Text()))
+	}
 }
 
 // clearMsgSeen clears our seen incoming messages for the passed in channel and URN
 func (b *backend) clearMsgSeen(rc redis.Conn, msg *DBMsg) {
-	b.seenMsgs.Remove(rc, msg.fingerprint(false))
-}
+	fingerprint := fmt.Sprintf("%s|%s", msg.Channel().UUID(), msg.URN().Identity())
 
-func (b *backend) checkExternalIDSeen(msg *DBMsg) courier.MsgUUID {
-	rc := b.redisPool.Get()
-	defer rc.Close()
-
-	uuidAndText, _ := b.seenExternalIDs.Get(rc, msg.fingerprint(true))
-
-	// if so, test whether the text it the same
-	if uuidAndText != "" {
-		prevText := uuidAndText[37:]
-
-		// if it is the same, return the UUID
-		if prevText == msg.Text() {
-			return courier.NewMsgUUIDFromString(uuidAndText[:36])
-		}
-	}
-	return courier.NilMsgUUID
-}
-
-func (b *backend) writeExternalIDSeen(msg *DBMsg) {
-	rc := b.redisPool.Get()
-	defer rc.Close()
-
-	b.seenExternalIDs.Set(rc, msg.fingerprint(true), fmt.Sprintf("%s|%s", msg.UUID().String(), msg.Text()))
+	b.seenMsgs.Remove(rc, fingerprint)
 }
 
 //-----------------------------------------------------------------------------
@@ -325,74 +328,78 @@ func (b *backend) writeExternalIDSeen(msg *DBMsg) {
 
 // DBMsg is our base struct to represent msgs both in our JSON and db representations
 type DBMsg struct {
-	OrgID_                OrgID                  `json:"org_id"          db:"org_id"`
-	ID_                   courier.MsgID          `json:"id"              db:"id"`
-	UUID_                 courier.MsgUUID        `json:"uuid"            db:"uuid"`
-	Direction_            MsgDirection           `json:"direction"       db:"direction"`
-	Status_               courier.MsgStatusValue `json:"status"          db:"status"`
-	Visibility_           MsgVisibility          `json:"visibility"      db:"visibility"`
-	HighPriority_         bool                   `json:"high_priority"   db:"high_priority"`
-	URN_                  urns.URN               `json:"urn"`
-	URNAuth_              string                 `json:"urn_auth"`
-	Text_                 string                 `json:"text"            db:"text"`
-	Attachments_          pq.StringArray         `json:"attachments"     db:"attachments"`
-	ExternalID_           null.String            `json:"external_id"     db:"external_id"`
-	ResponseToExternalID_ string                 `json:"response_to_external_id"`
-	IsResend_             bool                   `json:"is_resend,omitempty"`
-	Metadata_             json.RawMessage        `json:"metadata"        db:"metadata"`
+	OrgID_        OrgID                  `json:"org_id"          db:"org_id"`
+	ID_           courier.MsgID          `json:"id"              db:"id"`
+	UUID_         courier.MsgUUID        `json:"uuid"            db:"uuid"`
+	Direction_    MsgDirection           `                       db:"direction"`
+	Status_       courier.MsgStatusValue `                       db:"status"`
+	Visibility_   MsgVisibility          `                       db:"visibility"`
+	HighPriority_ bool                   `json:"high_priority"   db:"high_priority"`
+	Text_         string                 `json:"text"            db:"text"`
+	Attachments_  pq.StringArray         `json:"attachments"     db:"attachments"`
+	QuickReplies_ pq.StringArray         `json:"quick_replies"   db:"quick_replies"`
+	Locale_       null.String            `json:"locale"          db:"locale"`
+	ExternalID_   null.String            `                       db:"external_id"`
+	Metadata_     json.RawMessage        `json:"metadata"        db:"metadata"`
 
-	ChannelID_    courier.ChannelID `json:"channel_id"      db:"channel_id"`
+	ChannelID_    courier.ChannelID `                       db:"channel_id"`
 	ContactID_    ContactID         `json:"contact_id"      db:"contact_id"`
 	ContactURNID_ ContactURNID      `json:"contact_urn_id"  db:"contact_urn_id"`
 
-	MessageCount_ int         `json:"msg_count"     db:"msg_count"`
-	ErrorCount_   int         `json:"error_count"   db:"error_count"`
-	FailedReason_ null.String `json:"failed_reason" db:"failed_reason"`
+	MessageCount_ int         `                     db:"msg_count"`
+	ErrorCount_   int         `                     db:"error_count"`
+	FailedReason_ null.String `                     db:"failed_reason"`
 
-	ChannelUUID_ courier.ChannelUUID `json:"channel_uuid"`
-	ContactName_ string              `json:"contact_name"`
-
-	NextAttempt_ time.Time      `json:"next_attempt"  db:"next_attempt"`
+	NextAttempt_ time.Time      `                     db:"next_attempt"`
 	CreatedOn_   time.Time      `json:"created_on"    db:"created_on"`
-	ModifiedOn_  time.Time      `json:"modified_on"   db:"modified_on"`
-	QueuedOn_    time.Time      `json:"queued_on"     db:"queued_on"`
-	SentOn_      *time.Time     `json:"sent_on"       db:"sent_on"`
-	LogUUIDs     pq.StringArray `json:"log_uuids"     db:"log_uuids"`
+	ModifiedOn_  time.Time      `                     db:"modified_on"`
+	QueuedOn_    time.Time      `                     db:"queued_on"`
+	SentOn_      *time.Time     `                     db:"sent_on"`
+	LogUUIDs     pq.StringArray `                     db:"log_uuids"`
 
-	// fields used to allow courier to update a session's timeout when a message is sent for efficient timeout behavior
-	SessionID_            SessionID  `json:"session_id,omitempty"`
-	SessionTimeout_       int        `json:"session_timeout,omitempty"`
-	SessionWaitStartedOn_ *time.Time `json:"session_wait_started_on,omitempty"`
-	SessionStatus_        string     `json:"session_status,omitempty"`
+	// extra non-model fields that mailroom will include in queued payload
+	ChannelUUID_          courier.ChannelUUID    `json:"channel_uuid"`
+	URN_                  urns.URN               `json:"urn"`
+	URNAuth_              string                 `json:"urn_auth"`
+	ResponseToExternalID_ string                 `json:"response_to_external_id"`
+	IsResend_             bool                   `json:"is_resend"`
+	Flow_                 *courier.FlowReference `json:"flow"`
+	Origin_               courier.MsgOrigin      `json:"origin"`
+	ContactLastSeenOn_    *time.Time             `json:"contact_last_seen_on"`
 
-	Flow_ *courier.FlowReference `json:"flow,omitempty"`
+	// extra fields used to allow courier to update a session's timeout to *after* the message has been sent
+	SessionID_            SessionID  `json:"session_id"`
+	SessionTimeout_       int        `json:"session_timeout"`
+	SessionWaitStartedOn_ *time.Time `json:"session_wait_started_on"`
+	SessionStatus_        string     `json:"session_status"`
 
+	contactName    string
 	channel        *DBChannel
 	workerToken    queue.WorkerToken
 	alreadyWritten bool
-	quickReplies   []string
-	locale         string
 }
 
-func (m *DBMsg) ID() courier.MsgID            { return m.ID_ }
-func (m *DBMsg) EventID() int64               { return int64(m.ID_) }
-func (m *DBMsg) UUID() courier.MsgUUID        { return m.UUID_ }
-func (m *DBMsg) Text() string                 { return m.Text_ }
-func (m *DBMsg) Attachments() []string        { return []string(m.Attachments_) }
-func (m *DBMsg) ExternalID() string           { return string(m.ExternalID_) }
-func (m *DBMsg) URN() urns.URN                { return m.URN_ }
-func (m *DBMsg) URNAuth() string              { return m.URNAuth_ }
-func (m *DBMsg) ContactName() string          { return m.ContactName_ }
-func (m *DBMsg) HighPriority() bool           { return m.HighPriority_ }
-func (m *DBMsg) ReceivedOn() *time.Time       { return m.SentOn_ }
-func (m *DBMsg) SentOn() *time.Time           { return m.SentOn_ }
-func (m *DBMsg) ResponseToExternalID() string { return m.ResponseToExternalID_ }
-func (m *DBMsg) IsResend() bool               { return m.IsResend_ }
-
-func (m *DBMsg) Channel() courier.Channel { return m.channel }
-func (m *DBMsg) SessionStatus() string    { return m.SessionStatus_ }
-
-func (m *DBMsg) Flow() *courier.FlowReference { return m.Flow_ }
+func (m *DBMsg) ID() courier.MsgID             { return m.ID_ }
+func (m *DBMsg) EventID() int64                { return int64(m.ID_) }
+func (m *DBMsg) UUID() courier.MsgUUID         { return m.UUID_ }
+func (m *DBMsg) Text() string                  { return m.Text_ }
+func (m *DBMsg) Attachments() []string         { return m.Attachments_ }
+func (m *DBMsg) QuickReplies() []string        { return m.QuickReplies_ }
+func (m *DBMsg) Locale() courier.Locale        { return courier.Locale(string(m.Locale_)) }
+func (m *DBMsg) ExternalID() string            { return string(m.ExternalID_) }
+func (m *DBMsg) URN() urns.URN                 { return m.URN_ }
+func (m *DBMsg) URNAuth() string               { return m.URNAuth_ }
+func (m *DBMsg) ContactName() string           { return m.contactName }
+func (m *DBMsg) HighPriority() bool            { return m.HighPriority_ }
+func (m *DBMsg) ReceivedOn() *time.Time        { return m.SentOn_ }
+func (m *DBMsg) SentOn() *time.Time            { return m.SentOn_ }
+func (m *DBMsg) ResponseToExternalID() string  { return m.ResponseToExternalID_ }
+func (m *DBMsg) IsResend() bool                { return m.IsResend_ }
+func (m *DBMsg) Channel() courier.Channel      { return m.channel }
+func (m *DBMsg) SessionStatus() string         { return m.SessionStatus_ }
+func (m *DBMsg) Flow() *courier.FlowReference  { return m.Flow_ }
+func (m *DBMsg) Origin() courier.MsgOrigin     { return m.Origin_ }
+func (m *DBMsg) ContactLastSeenOn() *time.Time { return m.ContactLastSeenOn_ }
 
 func (m *DBMsg) FlowName() string {
 	if m.Flow_ == nil {
@@ -408,25 +415,6 @@ func (m *DBMsg) FlowUUID() string {
 	return m.Flow_.UUID
 }
 
-func (m *DBMsg) QuickReplies() []string {
-	if m.quickReplies != nil {
-		return m.quickReplies
-	}
-
-	if m.Metadata_ == nil {
-		return nil
-	}
-
-	m.quickReplies = []string{}
-	jsonparser.ArrayEach(
-		m.Metadata_,
-		func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
-			m.quickReplies = append(m.quickReplies, string(value))
-		},
-		"quick_replies")
-	return m.quickReplies
-}
-
 func (m *DBMsg) Topic() string {
 	if m.Metadata_ == nil {
 		return ""
@@ -435,39 +423,16 @@ func (m *DBMsg) Topic() string {
 	return string(topic)
 }
 
-func (m *DBMsg) Locale() string {
-	if m.locale != "" {
-		return m.locale
-	}
-	if m.Metadata_ == nil {
-		return ""
-	}
-
-	locale, _, _, _ := jsonparser.Get(m.Metadata_, "locale")
-	return string(locale)
-}
-
 // Metadata returns the metadata for this message
 func (m *DBMsg) Metadata() json.RawMessage {
 	return m.Metadata_
 }
 
-// fingerprint returns a fingerprint for this msg, suitable for figuring out if this is a dupe
-func (m *DBMsg) fingerprint(withExtID bool) string {
-	if withExtID {
-		return fmt.Sprintf("%s:%s|%s", m.Channel().UUID(), m.URN().Identity(), m.ExternalID())
-	}
-	return fmt.Sprintf("%s:%s", m.ChannelUUID_, m.URN_.Identity())
-}
-
 // WithContactName can be used to set the contact name on a msg
-func (m *DBMsg) WithContactName(name string) courier.Msg { m.ContactName_ = name; return m }
+func (m *DBMsg) WithContactName(name string) courier.Msg { m.contactName = name; return m }
 
 // WithReceivedOn can be used to set sent_on on a msg in a chained call
 func (m *DBMsg) WithReceivedOn(date time.Time) courier.Msg { m.SentOn_ = &date; return m }
-
-// WithExternalID can be used to set the external id on a msg in a chained call
-func (m *DBMsg) WithExternalID(id string) courier.Msg { m.ExternalID_ = null.String(id); return m }
 
 // WithID can be used to set the id on a msg in a chained call
 func (m *DBMsg) WithID(id courier.MsgID) courier.Msg { m.ID_ = id; return m }
@@ -486,6 +451,8 @@ func (m *DBMsg) WithAttachment(url string) courier.Msg {
 	m.Attachments_ = append(m.Attachments_, url)
 	return m
 }
+
+func (m *DBMsg) WithLocale(lc courier.Locale) courier.Msg { m.Locale_ = null.String(lc); return m }
 
 // WithURNAuth can be used to add a URN auth setting to a message
 func (m *DBMsg) WithURNAuth(auth string) courier.Msg {

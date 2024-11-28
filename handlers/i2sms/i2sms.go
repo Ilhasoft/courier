@@ -38,7 +38,7 @@ func newHandler() courier.ChannelHandler {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receive)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receive)
 	return nil
 }
 
@@ -62,7 +62,7 @@ func (h *handler) receive(ctx context.Context, c courier.Channel, w http.Respons
 	}
 
 	// build our msg
-	msg := h.Backend().NewIncomingMsg(c, urn, body, clog).WithReceivedOn(time.Now().UTC())
+	msg := h.Backend().NewIncomingMsg(c, urn, body, "", clog).WithReceivedOn(time.Now().UTC())
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.Msg{msg}, w, r, clog)
 }
 

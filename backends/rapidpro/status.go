@@ -2,18 +2,22 @@ package rapidpro
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/courier"
+	"github.com/nyaruka/courier/utils"
+	"github.com/nyaruka/gocommon/dbutil"
+	"github.com/nyaruka/gocommon/syncx"
 	"github.com/nyaruka/gocommon/urns"
+	"github.com/sirupsen/logrus"
 )
 
 // newMsgStatus creates a new DBMsgStatus for the passed in parameters
@@ -51,49 +55,26 @@ func writeMsgStatus(ctx context.Context, b *backend, status courier.MsgStatus) e
 	return err
 }
 
-const selectMsgIDForID = `
-SELECT m."id" FROM "msgs_msg" m INNER JOIN "channels_channel" c ON (m."channel_id" = c."id") WHERE (m."id" = $1 AND c."uuid" = $2 AND m."direction" = 'O')`
-
-const selectMsgIDForExternalID = `
-SELECT m."id" FROM "msgs_msg" m INNER JOIN "channels_channel" c ON (m."channel_id" = c."id") WHERE (m."external_id" = $1 AND c."uuid" = $2 AND m."direction" = 'O')`
-
-func checkMsgExists(b *backend, status courier.MsgStatus) (err error) {
-	var id int64
-
-	if status.ID() != courier.NilMsgID {
-		err = b.db.QueryRow(selectMsgIDForID, status.ID(), status.ChannelUUID()).Scan(&id)
-	} else if status.ExternalID() != "" {
-		err = b.db.QueryRow(selectMsgIDForExternalID, status.ExternalID(), status.ChannelUUID()).Scan(&id)
-	} else {
-		return fmt.Errorf("no id or external id for status update")
-	}
-
-	if err == sql.ErrNoRows {
-		return courier.ErrMsgNotFound
-	}
-	return err
-}
-
 // the craziness below lets us update our status to 'F' and schedule retries without knowing anything about the message
 const sqlUpdateMsgByID = `
 UPDATE msgs_msg SET 
 	status = CASE 
 		WHEN 
-			:status = 'E' 
+			s.status = 'E' 
 		THEN CASE 
 			WHEN 
-				error_count >= 2 OR status = 'F' 
+				error_count >= 2 OR msgs_msg.status = 'F' 
 			THEN 
 				'F' 
 			ELSE 
 				'E' 
 			END 
 		ELSE 
-			:status 
+			s.status 
 		END,
 	error_count = CASE 
 		WHEN 
-			:status = 'E' 
+			s.status = 'E' 
 		THEN 
 			error_count + 1 
 		ELSE 
@@ -101,7 +82,7 @@ UPDATE msgs_msg SET
 		END,
 	next_attempt = CASE 
 		WHEN 
-			:status = 'E' 
+			s.status = 'E' 
 		THEN 
 			NOW() + (5 * (error_count+1) * interval '1 minutes') 
 		ELSE 
@@ -117,7 +98,7 @@ UPDATE msgs_msg SET
 	    END,
 	sent_on = CASE 
 		WHEN
-			:status IN ('W', 'S', 'D')
+			s.status IN ('W', 'S', 'D')
 		THEN
 			COALESCE(sent_on, NOW())
 		ELSE
@@ -125,20 +106,22 @@ UPDATE msgs_msg SET
 		END,
 	external_id = CASE
 		WHEN 
-			:external_id != ''
+			s.external_id != ''
 		THEN
-			:external_id
+			s.external_id
 		ELSE
-			external_id
+			msgs_msg.external_id
 		END,
-	modified_on = :modified_on,
-	log_uuids = array_append(log_uuids, :log_uuid)
+	modified_on = NOW(),
+	log_uuids = array_append(log_uuids, s.log_uuid::uuid)
+FROM
+	(VALUES(:msg_id, :channel_id, :status, :external_id, :log_uuid)) 
+AS 
+	s(msg_id, channel_id, status, external_id, log_uuid) 
 WHERE 
-	msgs_msg.id = :msg_id AND
-	msgs_msg.channel_id = :channel_id AND 
+	msgs_msg.id = s.msg_id::bigint AND
+	msgs_msg.channel_id = s.channel_id::int AND 
 	msgs_msg.direction = 'O'
-RETURNING 
-	msgs_msg.id
 `
 
 const sqlUpdateMsgByExternalID = `
@@ -199,16 +182,19 @@ RETURNING
 
 // writeMsgStatusToDB writes the passed in msg status to our db
 func writeMsgStatusToDB(ctx context.Context, b *backend, status *DBMsgStatus) error {
+	if status.ID() == courier.NilMsgID && status.ExternalID() == "" {
+		return fmt.Errorf("attempt to update msg status without id or external id")
+	}
+
 	var rows *sqlx.Rows
 	var err error
 
 	if status.ID() != courier.NilMsgID {
-		rows, err = b.db.NamedQueryContext(ctx, sqlUpdateMsgByID, status)
-	} else if status.ExternalID() != "" {
-		rows, err = b.db.NamedQueryContext(ctx, sqlUpdateMsgByExternalID, status)
-	} else {
-		return fmt.Errorf("attempt to update msg status without id or external id")
+		err = dbutil.BulkQuery(context.Background(), b.db, sqlUpdateMsgByID, []*DBMsgStatus{status})
+		return err
 	}
+
+	rows, err = b.db.NamedQueryContext(ctx, sqlUpdateMsgByExternalID, status)
 	if err != nil {
 		return err
 	}
@@ -248,66 +234,6 @@ func (b *backend) flushStatusFile(filename string, contents []byte) error {
 
 	return err
 }
-
-const bulkUpdateMsgStatusSQL = `
-UPDATE msgs_msg SET 
-	status = CASE 
-		WHEN 
-			s.status = 'E' 
-		THEN CASE 
-			WHEN 
-				error_count >= 2 OR msgs_msg.status = 'F' 
-			THEN 
-				'F' 
-			ELSE 
-				'E' 
-			END 
-		ELSE 
-			s.status 
-		END,
-	error_count = CASE 
-		WHEN 
-			s.status = 'E' 
-		THEN 
-			error_count + 1 
-		ELSE 
-			error_count 
-		END,
-	next_attempt = CASE 
-		WHEN 
-			s.status = 'E' 
-		THEN 
-			NOW() + (5 * (error_count+1) * interval '1 minutes') 
-		ELSE 
-			next_attempt 
-		END,
-	sent_on = CASE 
-		WHEN
-			s.status IN ('W', 'S', 'D')
-		THEN
-			COALESCE(sent_on, NOW())
-		ELSE
-			NULL
-		END,
-	external_id = CASE
-		WHEN 
-			s.external_id != ''
-		THEN
-			s.external_id
-		ELSE
-			msgs_msg.external_id
-		END,
-	modified_on = NOW(),
-	log_uuids = array_append(log_uuids, s.log_uuid::uuid)
-FROM
-	(VALUES(:msg_id, :channel_id, :status, :external_id, :log_uuid)) 
-AS 
-	s(msg_id, channel_id, status, external_id, log_uuid) 
-WHERE 
-	msgs_msg.id = s.msg_id::bigint AND
-	msgs_msg.channel_id = s.channel_id::int AND 
-	msgs_msg.direction = 'O'
-`
 
 //-----------------------------------------------------------------------------
 // MsgStatusUpdate implementation
@@ -372,3 +298,46 @@ func (s *DBMsgStatus) SetExternalID(id string) { s.ExternalID_ = id }
 
 func (s *DBMsgStatus) Status() courier.MsgStatusValue          { return s.Status_ }
 func (s *DBMsgStatus) SetStatus(status courier.MsgStatusValue) { s.Status_ = status }
+
+type StatusWriter struct {
+	*syncx.Batcher[*DBMsgStatus]
+}
+
+func NewStatusWriter(db *sqlx.DB, spoolDir string, wg *sync.WaitGroup) *StatusWriter {
+	return &StatusWriter{
+		Batcher: syncx.NewBatcher[*DBMsgStatus](func(batch []*DBMsgStatus) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			writeMsgStatuses(ctx, db, spoolDir, batch)
+		}, time.Millisecond*500, 1000, wg),
+	}
+}
+
+func writeMsgStatuses(ctx context.Context, db *sqlx.DB, spoolDir string, statuses []*DBMsgStatus) {
+	for _, batch := range utils.ChunkSlice(statuses, 1000) {
+		err := dbutil.BulkQuery(ctx, db, sqlUpdateMsgByID, batch)
+
+		// if we received an error, try again one at a time (in case it is one value hanging us up)
+		if err != nil {
+			for _, s := range batch {
+				err = dbutil.BulkQuery(ctx, db, sqlUpdateMsgByID, []*DBMsgStatus{s})
+				if err != nil {
+					log := logrus.WithField("comp", "status writer").WithField("msg_id", s.ID())
+
+					if qerr := dbutil.AsQueryError(err); qerr != nil {
+						query, params := qerr.Query()
+						log = log.WithFields(logrus.Fields{"sql": query, "sql_params": params})
+					}
+
+					log.WithError(err).Error("error writing msg status")
+
+					err = courier.WriteToSpool(spoolDir, "statuses", s)
+					if err != nil {
+						logrus.WithField("comp", "status committer").WithError(err).Error("error writing status to spool")
+					}
+				}
+			}
+		}
+	}
+}

@@ -46,7 +46,7 @@ func newHandler() courier.ChannelHandler {
 
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveEvent)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeUnknown, handlers.JSONPayload(h, h.receiveEvent))
 	return nil
 }
 
@@ -62,19 +62,16 @@ func handleURLVerification(ctx context.Context, channel courier.Channel, w http.
 	return nil, nil
 }
 
-func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
-	payload := &moPayload{}
-	err := handlers.DecodeAndValidateJSON(payload, r)
-	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-	}
-
+func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	if payload.Type == "url_verification" {
+		clog.SetType(courier.ChannelLogTypeWebhookVerify)
+
 		return handleURLVerification(ctx, channel, w, r, payload)
 	}
 
 	// if event is not a message or is from the bot ignore it
 	if payload.Event.Type == "message" && payload.Event.BotID == "" && payload.Event.ChannelType == "im" {
+		clog.SetType(courier.ChannelLogTypeMsgReceive)
 
 		date := time.Unix(int64(payload.EventTime), 0)
 
@@ -94,7 +91,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		}
 
 		text := payload.Event.Text
-		msg := h.Backend().NewIncomingMsg(channel, urn, text, clog).WithReceivedOn(date).WithExternalID(payload.EventID)
+		msg := h.Backend().NewIncomingMsg(channel, urn, text, payload.EventID, clog).WithReceivedOn(date)
 
 		for _, attURL := range attachmentURLs {
 			msg.WithAttachment(attURL)
@@ -156,32 +153,39 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 
 	status := h.Backend().NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgErrored, clog)
 
-	hasError := true
-
 	for _, attachment := range msg.Attachments() {
 		fileAttachment, err := parseAttachmentToFileParams(msg, attachment, clog)
-		hasError = err != nil
+		if err != nil {
+			clog.RawError(err)
+			return status, nil
+		}
 
 		if fileAttachment != nil {
 			err = sendFilePart(msg, botToken, fileAttachment, clog)
-			hasError = err != nil
+			if err != nil {
+				clog.RawError(err)
+				return status, nil
+			}
 		}
 	}
 
 	if len(msg.QuickReplies()) != 0 {
 		_, err := sendQuickReplies(msg, botToken, clog)
-		hasError = err != nil
+		if err != nil {
+			clog.RawError(err)
+			return status, nil
+		}
 	}
 
 	if msg.Text() != "" && len(msg.QuickReplies()) == 0 {
 		err := sendTextMsgPart(msg, botToken, clog)
-		hasError = err != nil
+		if err != nil {
+			clog.RawError(err)
+			return status, nil
+		}
 	}
 
-	if !hasError {
-		status.SetStatus(courier.MsgWired)
-	}
-
+	status.SetStatus(courier.MsgWired)
 	return status, nil
 }
 

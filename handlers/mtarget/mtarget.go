@@ -44,10 +44,10 @@ var statusMapping = map[string]courier.MsgStatusValue{
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveMsg)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receiveMsg)
 
 	statusHandler := handlers.NewExternalIDStatusHandler(h, statusMapping, "MsgId", "Status")
-	s.AddHandlerRoute(h, http.MethodPost, "status", statusHandler)
+	s.AddHandlerRoute(h, http.MethodPost, "status", courier.ChannelLogTypeMsgStatus, statusHandler)
 	return nil
 }
 
@@ -85,7 +85,7 @@ func (h *handler) receiveMsg(ctx context.Context, c courier.Channel, w http.Resp
 		defer rc.Close()
 
 		// first things first, populate the new part we just received
-		mapKey := fmt.Sprintf("%s:%s", c.UUID().String(), longID)
+		mapKey := fmt.Sprintf("%s:%s", c.UUID(), longID)
 		rc.Send("MULTI")
 		rc.Send("HSET", mapKey, longRef, text)
 		rc.Send("EXPIRE", mapKey, 300)
@@ -141,9 +141,8 @@ func (h *handler) receiveMsg(ctx context.Context, c courier.Channel, w http.Resp
 		return []courier.Event{stop}, courier.WriteChannelEventSuccess(w, stop)
 	}
 
-	// otherwise, create our incoming message and write that
-	msg := h.Backend().NewIncomingMsg(c, urn, text, clog).WithReceivedOn(time.Now().UTC())
-	// and finally write our message
+	// otherwise, create and write the message
+	msg := h.Backend().NewIncomingMsg(c, urn, text, "", clog).WithReceivedOn(time.Now().UTC())
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.Msg{msg}, w, r, clog)
 }
 

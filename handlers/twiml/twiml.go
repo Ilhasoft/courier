@@ -78,8 +78,8 @@ func init() {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveMessage)
-	s.AddHandlerRoute(h, http.MethodPost, "status", h.receiveStatus)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receiveMessage)
+	s.AddHandlerRoute(h, http.MethodPost, "status", courier.ChannelLogTypeMsgStatus, h.receiveStatus)
 	return nil
 }
 
@@ -141,7 +141,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// build our msg
-	msg := h.Backend().NewIncomingMsg(channel, urn, text, clog).WithExternalID(form.MessageSID)
+	msg := h.Backend().NewIncomingMsg(channel, urn, text, form.MessageSID, clog)
 
 	// process any attached media
 	for i := 0; i < form.NumMedia; i++ {
@@ -183,7 +183,7 @@ func (h *handler) receiveStatus(ctx context.Context, channel courier.Channel, w 
 		if err != nil {
 			logrus.WithError(err).WithField("id", idString).Error("error converting twilio callback id to integer")
 		} else {
-			status = h.Backend().NewMsgStatusForID(channel, courier.NewMsgID(msgID), msgStatus, clog)
+			status = h.Backend().NewMsgStatusForID(channel, courier.MsgID(msgID), msgStatus, clog)
 		}
 	}
 
@@ -326,6 +326,27 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 	}
 
 	return status, nil
+}
+
+// BuildAttachmentRequest to download media for message attachment with Basic auth set
+func (h *handler) BuildAttachmentRequest(ctx context.Context, b courier.Backend, channel courier.Channel, attachmentURL string, clog *courier.ChannelLog) (*http.Request, error) {
+	accountSID := channel.StringConfigForKey(configAccountSID, "")
+	if accountSID == "" {
+		return nil, fmt.Errorf("missing account sid for %s channel", h.ChannelName())
+	}
+
+	accountToken := channel.StringConfigForKey(courier.ConfigAuthToken, "")
+	if accountToken == "" {
+		return nil, fmt.Errorf("missing account auth token for %s channel", h.ChannelName())
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, attachmentURL, nil)
+
+	if h.validateSignatures {
+		// set the basic auth token as the authorization header
+		req.SetBasicAuth(accountSID, accountToken)
+	}
+	return req, nil
 }
 
 func (h *handler) RedactValues(ch courier.Channel) []string {

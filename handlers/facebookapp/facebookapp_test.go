@@ -938,9 +938,22 @@ func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel,
 
 var SendTestCasesFBA = []ChannelSendTestCase{
 	{
-		Label:               "Plain Send",
+		Label:               "Text only chat message",
 		MsgText:             "Simple Message",
 		MsgURN:              "facebook:12345",
+		MsgOrigin:           courier.MsgOriginChat,
+		MockResponseBody:    `{"message_id": "mid.133"}`,
+		MockResponseStatus:  200,
+		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "mid.133",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:               "Text only broadcast message",
+		MsgText:             "Simple Message",
+		MsgURN:              "facebook:12345",
+		MsgOrigin:           courier.MsgOriginBroadcast,
 		MockResponseBody:    `{"message_id": "mid.133"}`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
@@ -949,9 +962,10 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:                   "Plain Response",
+		Label:                   "Text only flow response",
 		MsgText:                 "Simple Message",
 		MsgURN:                  "facebook:12345",
+		MsgOrigin:               courier.MsgOriginFlow,
 		MsgResponseToExternalID: "23526",
 		MockResponseBody:        `{"message_id": "mid.133"}`,
 		MockResponseStatus:      200,
@@ -961,21 +975,24 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:                setSendURL,
 	},
 	{
-		Label:               "Plain Send using ref URN",
-		MsgText:             "Simple Message",
-		MsgURN:              "facebook:ref:67890",
-		MockResponseBody:    `{"message_id": "mid.133", "recipient_id": "12345"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"user_ref":"67890"},"message":{"text":"Simple Message"}}`,
-		ExpectedContactURNs: map[string]bool{"facebook:12345": true, "ext:67890": true, "facebook:ref:67890": false},
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:                   "Text only flow response using referal URN",
+		MsgText:                 "Simple Message",
+		MsgURN:                  "facebook:ref:67890",
+		MsgOrigin:               courier.MsgOriginFlow,
+		MsgResponseToExternalID: "23526",
+		MockResponseBody:        `{"message_id": "mid.133", "recipient_id": "12345"}`,
+		MockResponseStatus:      200,
+		ExpectedRequestBody:     `{"messaging_type":"RESPONSE","recipient":{"user_ref":"67890"},"message":{"text":"Simple Message"}}`,
+		ExpectedContactURNs:     map[string]bool{"facebook:12345": true, "ext:67890": true, "facebook:ref:67890": false},
+		ExpectedMsgStatus:       "W",
+		ExpectedExternalID:      "mid.133",
+		SendPrep:                setSendURL,
 	},
 	{
-		Label:               "Quick Reply",
+		Label:               "Quick replies on a broadcast message",
 		MsgText:             "Are you happy?",
 		MsgURN:              "facebook:12345",
+		MsgOrigin:           courier.MsgOriginBroadcast,
 		MsgQuickReplies:     []string{"Yes", "No"},
 		MockResponseBody:    `{"message_id": "mid.133"}`,
 		MockResponseStatus:  200,
@@ -985,7 +1002,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:               "Long Message",
+		Label:               "Message that exceeds max text length",
 		MsgText:             "This is a long message which spans more than one part, what will actually be sent in the end if we exceed the max length?",
 		MsgURN:              "facebook:12345",
 		MsgQuickReplies:     []string{"Yes", "No"},
@@ -998,7 +1015,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:               "Send Photo",
+		Label:               "Image attachment",
 		MsgURN:              "facebook:12345",
 		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
 		MockResponseBody:    `{"message_id": "mid.133"}`,
@@ -1009,7 +1026,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:               "Send caption and photo with Quick Reply",
+		Label:               "Text, image attachment, quick replies and explicit message topic",
 		MsgText:             "This is some text.",
 		MsgURN:              "facebook:12345",
 		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
@@ -1023,7 +1040,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:               "Send Document",
+		Label:               "Document attachment",
 		MsgURN:              "facebook:12345",
 		MsgAttachments:      []string{"application/pdf:https://foo.bar/document.pdf"},
 		MockResponseBody:    `{"message_id": "mid.133"}`,
@@ -1034,7 +1051,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:              "ID Error",
+		Label:              "Response doesn't contain message id",
 		MsgText:            "ID Error",
 		MsgURN:             "facebook:12345",
 		MockResponseBody:   `{ "is_error": true }`,
@@ -1044,7 +1061,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:           setSendURL,
 	},
 	{
-		Label:              "Error",
+		Label:              "Response status code is non-200",
 		MsgText:            "Error",
 		MsgURN:             "facebook:12345",
 		MockResponseBody:   `{ "is_error": true }`,
@@ -1054,21 +1071,21 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		SendPrep:           setSendURL,
 	},
 	{
-		Label:              "Error Bad JSON",
+		Label:              "Response is invalid JSON",
 		MsgText:            "Error",
 		MsgURN:             "facebook:12345",
 		MockResponseBody:   `bad json`,
-		MockResponseStatus: 403,
+		MockResponseStatus: 200,
 		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
 		ExpectedMsgStatus:  "E",
 		SendPrep:           setSendURL,
 	},
 	{
-		Label:              "Error external",
+		Label:              "Response is channel specific error",
 		MsgText:            "Error",
 		MsgURN:             "facebook:12345",
 		MockResponseBody:   `{ "error": {"message": "The image size is too large.","code": 36000 }}`,
-		MockResponseStatus: 403,
+		MockResponseStatus: 400,
 		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("36000", "The image size is too large.")},
 		ExpectedMsgStatus:  "E",
 		SendPrep:           setSendURL,
@@ -1077,9 +1094,22 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 
 var SendTestCasesIG = []ChannelSendTestCase{
 	{
-		Label:               "Plain Send",
+		Label:               "Text only chat message",
 		MsgText:             "Simple Message",
 		MsgURN:              "instagram:12345",
+		MsgOrigin:           courier.MsgOriginChat,
+		MockResponseBody:    `{"message_id": "mid.133"}`,
+		MockResponseStatus:  200,
+		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "mid.133",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:               "Text only broadcast message",
+		MsgText:             "Simple Message",
+		MsgURN:              "instagram:12345",
+		MsgOrigin:           courier.MsgOriginBroadcast,
 		MockResponseBody:    `{"message_id": "mid.133"}`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
@@ -1088,9 +1118,10 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:                   "Plain Response",
+		Label:                   "Text only flow response",
 		MsgText:                 "Simple Message",
 		MsgURN:                  "instagram:12345",
+		MsgOrigin:               courier.MsgOriginFlow,
 		MsgResponseToExternalID: "23526",
 		MockResponseBody:        `{"message_id": "mid.133"}`,
 		MockResponseStatus:      200,
@@ -1100,9 +1131,10 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		SendPrep:                setSendURL,
 	},
 	{
-		Label:               "Quick Reply",
+		Label:               "Quick replies on a broadcast message",
 		MsgText:             "Are you happy?",
 		MsgURN:              "instagram:12345",
+		MsgOrigin:           courier.MsgOriginBroadcast,
 		MsgQuickReplies:     []string{"Yes", "No"},
 		MockResponseBody:    `{"message_id": "mid.133"}`,
 		MockResponseStatus:  200,
@@ -1112,20 +1144,20 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:               "Long Message",
+		Label:               "Message that exceeds max text length",
 		MsgText:             "This is a long message which spans more than one part, what will actually be sent in the end if we exceed the max length?",
 		MsgURN:              "instagram:12345",
 		MsgQuickReplies:     []string{"Yes", "No"},
-		MsgTopic:            "agent",
+		MsgTopic:            "account",
 		MockResponseBody:    `{"message_id": "mid.133"}`,
 		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"we exceed the max length?","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
+		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"ACCOUNT_UPDATE","recipient":{"id":"12345"},"message":{"text":"we exceed the max length?","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "mid.133",
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:               "Send Photo",
+		Label:               "Image attachment",
 		MsgURN:              "instagram:12345",
 		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
 		MockResponseBody:    `{"message_id": "mid.133"}`,
@@ -1133,21 +1165,24 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"image","payload":{"url":"https://foo.bar/image.jpg","is_reusable":true}}}}`,
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL},
+		SendPrep:            setSendURL,
+	},
 	{
-		Label:               "Send caption and photo with Quick Reply",
+		Label:               "Text, image attachment, quick replies and explicit message topic",
 		MsgText:             "This is some text.",
 		MsgURN:              "instagram:12345",
 		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
 		MsgQuickReplies:     []string{"Yes", "No"},
+		MsgTopic:            "event",
 		MockResponseBody:    `{"message_id": "mid.133"}`,
 		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"This is some text.","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
+		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"CONFIRMED_EVENT_UPDATE","recipient":{"id":"12345"},"message":{"text":"This is some text.","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL},
+		SendPrep:            setSendURL,
+	},
 	{
-		Label:               "Tag Human Agent",
+		Label:               "Explicit human agent tag",
 		MsgText:             "Simple Message",
 		MsgURN:              "instagram:12345",
 		MsgTopic:            "agent",
@@ -1156,9 +1191,10 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL},
+		SendPrep:            setSendURL,
+	},
 	{
-		Label:               "Send Document",
+		Label:               "Document attachment",
 		MsgURN:              "instagram:12345",
 		MsgAttachments:      []string{"application/pdf:https://foo.bar/document.pdf"},
 		MockResponseBody:    `{"message_id": "mid.133"}`,
@@ -1166,9 +1202,10 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"file","payload":{"url":"https://foo.bar/document.pdf","is_reusable":true}}}}`,
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL},
+		SendPrep:            setSendURL,
+	},
 	{
-		Label:              "ID Error",
+		Label:              "Response doesn't contain message id",
 		MsgText:            "ID Error",
 		MsgURN:             "instagram:12345",
 		MockResponseBody:   `{ "is_error": true }`,
@@ -1178,7 +1215,7 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		SendPrep:           setSendURL,
 	},
 	{
-		Label:              "Error",
+		Label:              "Response status code is non-200",
 		MsgText:            "Error",
 		MsgURN:             "instagram:12345",
 		MockResponseBody:   `{ "is_error": true }`,
@@ -1188,21 +1225,21 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		SendPrep:           setSendURL,
 	},
 	{
-		Label:              "Error Bad JSON",
+		Label:              "Response is invalid JSON",
 		MsgText:            "Error",
 		MsgURN:             "instagram:12345",
 		MockResponseBody:   `bad json`,
-		MockResponseStatus: 403,
+		MockResponseStatus: 200,
 		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
 		ExpectedMsgStatus:  "E",
 		SendPrep:           setSendURL,
 	},
 	{
-		Label:              "Error external",
+		Label:              "Response is channel specific error",
 		MsgText:            "Error",
 		MsgURN:             "instagram:12345",
 		MockResponseBody:   `{ "error": {"message": "The image size is too large.","code": 36000 }}`,
-		MockResponseStatus: 403,
+		MockResponseStatus: 400,
 		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("36000", "The image size is too large.")},
 		ExpectedMsgStatus:  "E",
 		SendPrep:           setSendURL,
@@ -1298,9 +1335,10 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		Label:               "Template Send",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "eng",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "157b5e14568e8",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -1310,7 +1348,8 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		Label:               "Template Country Language",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
+		MsgLocale:           "eng-US",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -1319,11 +1358,17 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:          "Template Invalid Language",
-		MsgText:        "templated message",
-		MsgURN:         "whatsapp:250788123123",
-		MsgMetadata:    json.RawMessage(`{"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}}`),
-		ExpectedErrors: []*courier.ChannelError{courier.NewChannelError("", "", `unable to decode template: {"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}} for channel: 8eb23e93-5ecb-45ba-b726-3b064e0c56ab: unable to find mapping for language: bnt`)},
+		Label:               "Template Invalid Language",
+		MsgText:             "templated message",
+		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "bnt",
+		MsgMetadata:         json.RawMessage(`{"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "variables": ["Chef", "tomorrow"]}}`),
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  200,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
 	},
 	{
 		Label:               "Interactive Button Message Send",
@@ -1345,6 +1390,19 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  201,
 		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"list","body":{"text":"Interactive List Msg"},"action":{"button":"Menu","sections":[{"rows":[{"id":"0","title":"ROW1"},{"id":"1","title":"ROW2"},{"id":"2","title":"ROW3"},{"id":"3","title":"ROW4"}]}]}}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:               "Interactive List Message Send In Spanish",
+		MsgText:             "Hola",
+		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "spa",
+		MsgQuickReplies:     []string{"ROW1", "ROW2", "ROW3", "ROW4"},
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  201,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"list","body":{"text":"Hola"},"action":{"button":"Menú","sections":[{"rows":[{"id":"0","title":"ROW1"},{"id":"1","title":"ROW2"},{"id":"2","title":"ROW3"},{"id":"3","title":"ROW4"}]}]}}}`,
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "157b5e14568e8",
 		SendPrep:            setSendURL,
@@ -1514,7 +1572,7 @@ func newServer(backend courier.Backend) courier.Server {
 	return courier.NewServer(config, backend)
 }
 
-func TestBuildMediaRequest(t *testing.T) {
+func TestBuildAttachmentRequest(t *testing.T) {
 	mb := test.NewMockBackend()
 	s := newServer(mb)
 	wacHandler := &handler{NewBaseHandlerWithParams(courier.ChannelType("WAC"), "WhatsApp Cloud", false, nil)}
@@ -1534,4 +1592,16 @@ func TestBuildMediaRequest(t *testing.T) {
 	req, _ = igHandler.BuildAttachmentRequest(context.Background(), mb, testChannelsFBA[0], "https://example.org/v1/media/41", nil)
 	assert.Equal(t, "https://example.org/v1/media/41", req.URL.String())
 	assert.Equal(t, http.Header{}, req.Header)
+}
+
+func TestGetSupportedLanguage(t *testing.T) {
+	assert.Equal(t, languageInfo{"en", "Menu"}, getSupportedLanguage(courier.NilLocale))
+	assert.Equal(t, languageInfo{"en", "Menu"}, getSupportedLanguage(courier.Locale("eng")))
+	assert.Equal(t, languageInfo{"en_US", "Menu"}, getSupportedLanguage(courier.Locale("eng-US")))
+	assert.Equal(t, languageInfo{"pt_PT", "Menu"}, getSupportedLanguage(courier.Locale("por")))
+	assert.Equal(t, languageInfo{"pt_PT", "Menu"}, getSupportedLanguage(courier.Locale("por-PT")))
+	assert.Equal(t, languageInfo{"pt_BR", "Menu"}, getSupportedLanguage(courier.Locale("por-BR")))
+	assert.Equal(t, languageInfo{"fil", "Menu"}, getSupportedLanguage(courier.Locale("fil")))
+	assert.Equal(t, languageInfo{"fr", "Menu"}, getSupportedLanguage(courier.Locale("fra-CA")))
+	assert.Equal(t, languageInfo{"en", "Menu"}, getSupportedLanguage(courier.Locale("run")))
 }

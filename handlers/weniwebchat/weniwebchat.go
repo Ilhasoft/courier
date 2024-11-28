@@ -32,7 +32,7 @@ func newHandler() courier.ChannelHandler {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveEvent)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receiveEvent)
 	return nil
 }
 
@@ -92,8 +92,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 
 	// build message
 	date := time.Unix(ts, 0).UTC()
-	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Message.Text, clog).WithReceivedOn(date).WithContactName(payload.From)
-
+	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Message.Text, "", clog).WithReceivedOn(date).WithContactName(payload.From)
 	if mediaURL != "" {
 		msg.WithAttachment(mediaURL)
 	}
@@ -161,7 +160,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 					MediaURL: attachmentURL,
 				}
 			} else {
-				logrus.WithField("channel_uuid", msg.Channel().UUID().String()).Error("unknown attachment mime type: ", mimeType)
+				logrus.WithField("channel_uuid", msg.Channel().UUID()).Error("unknown attachment mime type: ", mimeType)
 				status.SetStatus(courier.MsgFailed)
 				break attachmentsLoop
 			}
@@ -180,7 +179,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 			var body []byte
 			body, err := json.Marshal(&payload)
 			if err != nil {
-				logrus.WithField("channel_uuid", msg.Channel().UUID().String()).WithError(err).Error("Error sending message")
+				logrus.WithField("channel_uuid", msg.Channel().UUID()).WithError(err).Error("Error sending message")
 				status.SetStatus(courier.MsgFailed)
 				break attachmentsLoop
 			}
@@ -188,7 +187,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 			req.Header.Set("Content-Type", "application/json")
 			_, _, err = handlers.RequestHTTP(req, clog)
 			if err != nil {
-				logrus.WithField("channel_uuid", msg.Channel().UUID().String()).WithError(err).Error("Message Send Error")
+				logrus.WithField("channel_uuid", msg.Channel().UUID()).WithError(err).Error("Message Send Error")
 				status.SetStatus(courier.MsgFailed)
 			}
 			if err != nil {
@@ -206,7 +205,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 		// build request
 		body, err := json.Marshal(&payload)
 		if err != nil {
-			logrus.WithField("channel_uuid", msg.Channel().UUID().String()).WithError(err).Error("Message Send Error")
+			logrus.WithField("channel_uuid", msg.Channel().UUID()).WithError(err).Error("Message Send Error")
 			status.SetStatus(courier.MsgFailed)
 			status.SetStatus(courier.MsgFailed)
 		} else {

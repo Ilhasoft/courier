@@ -37,7 +37,7 @@ func newHandler() courier.ChannelHandler {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveMessage)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, handlers.JSONPayload(h, h.receiveMessage))
 	return nil
 }
 
@@ -57,17 +57,11 @@ type moPayload struct {
 }
 
 // receiveMessage is our HTTP handler function for incoming messages
-func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
+func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	// check authorization
 	secret := channel.StringConfigForKey(configSecret, "")
 	if fmt.Sprintf("Token %s", secret) != r.Header.Get("Authorization") {
 		return nil, courier.WriteAndLogUnauthorized(w, r, channel, fmt.Errorf("invalid Authorization header"))
-	}
-
-	payload := &moPayload{}
-	err := handlers.DecodeAndValidateJSON(payload, r)
-	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
 
 	// check content empty
@@ -80,7 +74,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
 
-	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Text, clog).WithContactName(payload.User.FullName)
+	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Text, "", clog).WithContactName(payload.User.FullName)
 	for _, attachment := range payload.Attachments {
 		msg.WithAttachment(attachment.URL)
 	}

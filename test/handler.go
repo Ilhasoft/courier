@@ -39,7 +39,7 @@ func (h *mockHandler) GetChannel(ctx context.Context, r *http.Request) (courier.
 func (h *mockHandler) Initialize(s courier.Server) error {
 	h.server = s
 	h.backend = s.Backend()
-	s.AddHandlerRoute(h, http.MethodGet, "receive", h.receiveMsg)
+	s.AddHandlerRoute(h, http.MethodGet, "receive", courier.ChannelLogTypeMsgReceive, h.receiveMsg)
 	return nil
 }
 
@@ -81,7 +81,7 @@ func (h *mockHandler) receiveMsg(ctx context.Context, channel courier.Channel, w
 		return nil, errors.New("missing from or text")
 	}
 
-	msg := h.backend.NewIncomingMsg(channel, urns.URN("tel:"+from), text, clog)
+	msg := h.backend.NewIncomingMsg(channel, urns.URN("tel:"+from), text, "", clog)
 	w.WriteHeader(200)
 	w.Write([]byte("ok"))
 	h.backend.WriteMsg(ctx, msg, clog)

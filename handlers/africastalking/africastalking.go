@@ -40,10 +40,10 @@ type moForm struct {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveMessage)
-	s.AddHandlerRoute(h, http.MethodPost, "callback", h.receiveMessage)
-	s.AddHandlerRoute(h, http.MethodPost, "delivery", h.receiveStatus)
-	s.AddHandlerRoute(h, http.MethodPost, "status", h.receiveStatus)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, h.receiveMessage)
+	s.AddHandlerRoute(h, http.MethodPost, "callback", courier.ChannelLogTypeMsgReceive, h.receiveMessage)
+	s.AddHandlerRoute(h, http.MethodPost, "delivery", courier.ChannelLogTypeMsgStatus, h.receiveStatus)
+	s.AddHandlerRoute(h, http.MethodPost, "status", courier.ChannelLogTypeMsgStatus, h.receiveStatus)
 	return nil
 }
 
@@ -73,7 +73,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
 	// build our msg
-	msg := h.Backend().NewIncomingMsg(channel, urn, form.Text, clog).WithExternalID(form.ID).WithReceivedOn(date)
+	msg := h.Backend().NewIncomingMsg(channel, urn, form.Text, form.ID, clog).WithReceivedOn(date)
 
 	// and finally write our message
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.Msg{msg}, w, r, clog)

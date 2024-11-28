@@ -73,7 +73,7 @@ func newHandler() courier.ChannelHandler {
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	s.AddHandlerRoute(h, http.MethodPost, "receive", h.receiveEvent)
+	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeUnknown, handlers.JSONPayload(h, h.receiveEvent))
 	return nil
 }
 
@@ -116,14 +116,8 @@ type welcomeMessagePayload struct {
 }
 
 // receiveEvent is our HTTP handler function for incoming messages
-func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
+func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *eventPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	err := h.validateSignature(channel, r)
-	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
-	}
-
-	payload := &eventPayload{}
-	err = handlers.DecodeAndValidateJSON(payload, r)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -131,9 +125,13 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 	event := payload.Event
 	switch event {
 	case "webhook":
+		clog.SetType(courier.ChannelLogTypeWebhookVerify)
+
 		return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "webhook valid")
 
 	case "conversation_started":
+		clog.SetType(courier.ChannelLogTypeEventReceive)
+
 		msgText := channel.StringConfigForKey(configViberWelcomeMessage, "")
 		if msgText == "" {
 			return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignored conversation start")
@@ -158,6 +156,8 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		return []courier.Event{channelEvent}, writeWelcomeMessageResponse(w, channel, channelEvent)
 
 	case "subscribed":
+		clog.SetType(courier.ChannelLogTypeEventReceive)
+
 		viberID := payload.User.ID
 		ContactName := payload.User.Name
 
@@ -178,6 +178,8 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		return []courier.Event{channelEvent}, courier.WriteChannelEventSuccess(w, channelEvent)
 
 	case "unsubscribed":
+		clog.SetType(courier.ChannelLogTypeEventReceive)
+
 		viberID := payload.UserID
 
 		// build the URN
@@ -196,14 +198,20 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		return []courier.Event{channelEvent}, courier.WriteChannelEventSuccess(w, channelEvent)
 
 	case "failed":
+		clog.SetType(courier.ChannelLogTypeMsgStatus)
+
 		msgStatus := h.Backend().NewMsgStatusForExternalID(channel, fmt.Sprintf("%d", payload.MessageToken), courier.MsgFailed, clog)
 		return handlers.WriteMsgStatusAndResponse(ctx, h, channel, msgStatus, w, r)
 
 	case "delivered":
+		clog.SetType(courier.ChannelLogTypeMsgStatus)
+
 		// we ignore delivered events for viber as they send these for incoming messages too and its not worth the db hit to verify that
 		return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "ignoring delivered status")
 
 	case "message":
+		clog.SetType(courier.ChannelLogTypeMsgReceive)
+
 		sender := payload.Sender.ID
 		if sender == "" {
 			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("missing required sender id"))
@@ -254,7 +262,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		}
 
 		// build our msg
-		msg := h.Backend().NewIncomingMsg(channel, urn, text, clog).WithExternalID(fmt.Sprintf("%d", payload.MessageToken)).WithContactName(contactName)
+		msg := h.Backend().NewIncomingMsg(channel, urn, text, fmt.Sprintf("%d", payload.MessageToken), clog).WithContactName(contactName)
 		if mediaURL != "" {
 			msg.WithAttachment(mediaURL)
 		}
