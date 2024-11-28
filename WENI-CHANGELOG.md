@@ -1,3 +1,8 @@
+1.5.7-courier-8.2.1
+----------
+  * Update to v8.2.1
+  * Fix tests
+
 1.5.6-courier-7.5.66
 ----------
   * Add support for sending templates with media in WA
