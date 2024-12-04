@@ -6,7 +6,6 @@ import (
 	"net/url"
 
 	"github.com/nyaruka/courier"
-	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/pkg/errors"
 )
@@ -39,7 +38,7 @@ func SendWebhooks(channel courier.Channel, r *http.Request, configWebhook interf
 		req.Header.Set(name, value.(string))
 	}
 
-	trace, err := httpx.DoTrace(utils.GetHTTPClient(), req, nil, nil, 1024)
+	trace, err := httpx.DoTrace(http.DefaultClient, req, nil, nil, 1024)
 	if trace != nil {
 		clog.HTTP(trace)
 	}

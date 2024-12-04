@@ -3,31 +3,41 @@ package rapidpro
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/courier"
-	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/dbutil"
 	"github.com/nyaruka/gocommon/syncx"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/sirupsen/logrus"
+	"github.com/pkg/errors"
 )
 
-// newMsgStatus creates a new DBMsgStatus for the passed in parameters
-func newMsgStatus(channel courier.Channel, id courier.MsgID, externalID string, status courier.MsgStatusValue, clog *courier.ChannelLog) *DBMsgStatus {
-	dbChannel := channel.(*DBChannel)
+// StatusUpdate represents a status update on a message
+type StatusUpdate struct {
+	ChannelUUID_ courier.ChannelUUID    `json:"channel_uuid"             db:"channel_uuid"`
+	ChannelID_   courier.ChannelID      `json:"channel_id"               db:"channel_id"`
+	MsgID_       courier.MsgID          `json:"msg_id,omitempty"         db:"msg_id"`
+	OldURN_      urns.URN               `json:"old_urn"                  db:"old_urn"`
+	NewURN_      urns.URN               `json:"new_urn"                  db:"new_urn"`
+	ExternalID_  string                 `json:"external_id,omitempty"    db:"external_id"`
+	Status_      courier.MsgStatus      `json:"status"                   db:"status"`
+	ModifiedOn_  time.Time              `json:"modified_on"              db:"modified_on"`
+	LogUUID      courier.ChannelLogUUID `json:"log_uuid"                 db:"log_uuid"`
+}
 
-	return &DBMsgStatus{
+// creates a new message status update
+func newStatusUpdate(channel courier.Channel, id courier.MsgID, externalID string, status courier.MsgStatus, clog *courier.ChannelLog) *StatusUpdate {
+	dbChannel := channel.(*Channel)
+
+	return &StatusUpdate{
 		ChannelUUID_: channel.UUID(),
 		ChannelID_:   dbChannel.ID(),
-		ID_:          id,
+		MsgID_:       id,
 		OldURN_:      urns.NilURN,
 		NewURN_:      urns.NilURN,
 		ExternalID_:  externalID,
@@ -35,24 +45,6 @@ func newMsgStatus(channel courier.Channel, id courier.MsgID, externalID string, 
 		ModifiedOn_:  time.Now().In(time.UTC),
 		LogUUID:      clog.UUID(),
 	}
-}
-
-// writeMsgStatus writes the passed in status to the database, queueing it to our spool in case the database is down
-func writeMsgStatus(ctx context.Context, b *backend, status courier.MsgStatus) error {
-	dbStatus := status.(*DBMsgStatus)
-
-	err := writeMsgStatusToDB(ctx, b, dbStatus)
-
-	if err == courier.ErrMsgNotFound {
-		return err
-	}
-
-	// failed writing, write to our spool instead
-	if err != nil {
-		err = courier.WriteToSpool(b.config.SpoolDir, "statuses", dbStatus)
-	}
-
-	return err
 }
 
 // the craziness below lets us update our status to 'F' and schedule retries without knowing anything about the message
@@ -124,149 +116,26 @@ WHERE
 	msgs_msg.direction = 'O'
 `
 
-const sqlUpdateMsgByExternalID = `
-UPDATE msgs_msg SET 
-	status = CASE 
-		WHEN 
-			:status = 'E' 
-		THEN CASE 
-			WHEN 
-				error_count >= 2 OR status = 'F' 
-			THEN 
-				'F' 
-			ELSE 
-				'E' 
-			END 
-		ELSE 
-			:status 
-		END,
-	error_count = CASE 
-		WHEN 
-			:status = 'E' 
-		THEN 
-			error_count + 1 
-		ELSE 
-			error_count 
-		END,
-	next_attempt = CASE 
-		WHEN 
-			:status = 'E' 
-		THEN 
-			NOW() + (5 * (error_count+1) * interval '1 minutes') 
-		ELSE 
-			next_attempt 
-		END,
-	failed_reason = CASE
-		WHEN
-			error_count >= 2
-		THEN
-			'E'
-		ELSE
-			failed_reason
-	    END,
-	sent_on = CASE 
-		WHEN
-			:status IN ('W', 'S', 'D')
-		THEN
-			COALESCE(sent_on, NOW())
-		ELSE
-			NULL
-		END,
-	modified_on = :modified_on,
-	log_uuids = array_append(log_uuids, :log_uuid)
-WHERE 
-	msgs_msg.id = (SELECT msgs_msg.id FROM msgs_msg WHERE msgs_msg.external_id = :external_id AND msgs_msg.channel_id = :channel_id AND msgs_msg.direction = 'O' LIMIT 1)
-RETURNING 
-	msgs_msg.id
-`
-
-// writeMsgStatusToDB writes the passed in msg status to our db
-func writeMsgStatusToDB(ctx context.Context, b *backend, status *DBMsgStatus) error {
-	if status.ID() == courier.NilMsgID && status.ExternalID() == "" {
-		return fmt.Errorf("attempt to update msg status without id or external id")
-	}
-
-	var rows *sqlx.Rows
-	var err error
-
-	if status.ID() != courier.NilMsgID {
-		err = dbutil.BulkQuery(context.Background(), b.db, sqlUpdateMsgByID, []*DBMsgStatus{status})
-		return err
-	}
-
-	rows, err = b.db.NamedQueryContext(ctx, sqlUpdateMsgByExternalID, status)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	// scan and read the id of the msg that was updated
-	if rows.Next() {
-		rows.Scan(&status.ID_)
-	} else {
-		return courier.ErrMsgNotFound
-	}
-
-	return nil
-}
-
 func (b *backend) flushStatusFile(filename string, contents []byte) error {
-	status := &DBMsgStatus{}
+	ctx := context.Background()
+	status := &StatusUpdate{}
 	err := json.Unmarshal(contents, status)
 	if err != nil {
-		log.Printf("ERROR unmarshalling spool file '%s', renaming: %s\n", filename, err)
+		slog.Info(fmt.Sprintf("ERROR unmarshalling spool file '%s', renaming: %s\n", filename, err))
 		os.Rename(filename, fmt.Sprintf("%s.error", filename))
 		return nil
 	}
 
 	// try to flush to our db
-	err = writeMsgStatusToDB(context.Background(), b, status)
-
-	// not finding the message is ok for status updates
-	if err == courier.ErrMsgNotFound {
-		return nil
-	}
-
-	// Ignore wrong status update for incoming messages
-	if err == courier.ErrWrongIncomingMsgStatus {
-		return nil
-	}
-
+	_, err = b.writeStatusUpdatesToDB(ctx, []*StatusUpdate{status})
 	return err
 }
 
-//-----------------------------------------------------------------------------
-// MsgStatusUpdate implementation
-//-----------------------------------------------------------------------------
+func (s *StatusUpdate) EventID() int64                   { return int64(s.MsgID_) }
+func (s *StatusUpdate) ChannelUUID() courier.ChannelUUID { return s.ChannelUUID_ }
+func (s *StatusUpdate) MsgID() courier.MsgID             { return s.MsgID_ }
 
-// DBMsgStatus represents a status update on a message
-type DBMsgStatus struct {
-	ChannelUUID_ courier.ChannelUUID    `json:"channel_uuid"             db:"channel_uuid"`
-	ChannelID_   courier.ChannelID      `json:"channel_id"               db:"channel_id"`
-	ID_          courier.MsgID          `json:"msg_id,omitempty"         db:"msg_id"`
-	OldURN_      urns.URN               `json:"old_urn"                  db:"old_urn"`
-	NewURN_      urns.URN               `json:"new_urn"                  db:"new_urn"`
-	ExternalID_  string                 `json:"external_id,omitempty"    db:"external_id"`
-	Status_      courier.MsgStatusValue `json:"status"                   db:"status"`
-	ModifiedOn_  time.Time              `json:"modified_on"              db:"modified_on"`
-	LogUUID      courier.ChannelLogUUID `json:"log_uuid"                 db:"log_uuid"`
-}
-
-func (s *DBMsgStatus) EventID() int64 { return int64(s.ID_) }
-
-func (s *DBMsgStatus) ChannelUUID() courier.ChannelUUID { return s.ChannelUUID_ }
-func (s *DBMsgStatus) ID() courier.MsgID                { return s.ID_ }
-
-func (s *DBMsgStatus) RowID() string {
-	if s.ID_ != courier.NilMsgID {
-		return strconv.FormatInt(int64(s.ID_), 10)
-	} else if s.ExternalID_ != "" {
-		return s.ExternalID_
-	}
-	return ""
-}
-
-func (s *DBMsgStatus) SetUpdatedURN(old, new urns.URN) error {
+func (s *StatusUpdate) SetURNUpdate(old, new urns.URN) error {
 	// check by nil URN
 	if old == urns.NilURN || new == urns.NilURN {
 		return errors.New("cannot update contact URN from/to nil URN")
@@ -283,61 +152,174 @@ func (s *DBMsgStatus) SetUpdatedURN(old, new urns.URN) error {
 	s.NewURN_ = new
 	return nil
 }
-func (s *DBMsgStatus) UpdatedURN() (urns.URN, urns.URN) {
+func (s *StatusUpdate) URNUpdate() (urns.URN, urns.URN) {
 	return s.OldURN_, s.NewURN_
 }
-func (s *DBMsgStatus) HasUpdatedURN() bool {
-	if s.OldURN_ != urns.NilURN && s.NewURN_ != urns.NilURN {
-		return true
-	}
-	return false
-}
 
-func (s *DBMsgStatus) ExternalID() string      { return s.ExternalID_ }
-func (s *DBMsgStatus) SetExternalID(id string) { s.ExternalID_ = id }
+func (s *StatusUpdate) ExternalID() string      { return s.ExternalID_ }
+func (s *StatusUpdate) SetExternalID(id string) { s.ExternalID_ = id }
 
-func (s *DBMsgStatus) Status() courier.MsgStatusValue          { return s.Status_ }
-func (s *DBMsgStatus) SetStatus(status courier.MsgStatusValue) { s.Status_ = status }
+func (s *StatusUpdate) Status() courier.MsgStatus          { return s.Status_ }
+func (s *StatusUpdate) SetStatus(status courier.MsgStatus) { s.Status_ = status }
 
+// StatusWriter handles batched writes of status updates to the database
 type StatusWriter struct {
-	*syncx.Batcher[*DBMsgStatus]
+	*syncx.Batcher[*StatusUpdate]
 }
 
-func NewStatusWriter(db *sqlx.DB, spoolDir string, wg *sync.WaitGroup) *StatusWriter {
+// NewStatusWriter creates a new status update writer
+func NewStatusWriter(b *backend, spoolDir string, wg *sync.WaitGroup) *StatusWriter {
 	return &StatusWriter{
-		Batcher: syncx.NewBatcher[*DBMsgStatus](func(batch []*DBMsgStatus) {
+		Batcher: syncx.NewBatcher[*StatusUpdate](func(batch []*StatusUpdate) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 
-			writeMsgStatuses(ctx, db, spoolDir, batch)
-		}, time.Millisecond*500, 1000, wg),
+			b.writeStatuseUpdates(ctx, spoolDir, batch)
+
+		}, 1000, time.Millisecond*500, 1000, wg),
 	}
 }
 
-func writeMsgStatuses(ctx context.Context, db *sqlx.DB, spoolDir string, statuses []*DBMsgStatus) {
-	for _, batch := range utils.ChunkSlice(statuses, 1000) {
-		err := dbutil.BulkQuery(ctx, db, sqlUpdateMsgByID, batch)
+// tries to write a batch of message statuses to the database and spools those that fail
+func (b *backend) writeStatuseUpdates(ctx context.Context, spoolDir string, batch []*StatusUpdate) {
+	log := slog.With("comp", "status writer")
 
-		// if we received an error, try again one at a time (in case it is one value hanging us up)
-		if err != nil {
-			for _, s := range batch {
-				err = dbutil.BulkQuery(ctx, db, sqlUpdateMsgByID, []*DBMsgStatus{s})
+	unresolved, err := b.writeStatusUpdatesToDB(ctx, batch)
+
+	// if we received an error, try again one at a time (in case it is one value hanging us up)
+	if err != nil {
+		for _, s := range batch {
+			_, err = b.writeStatusUpdatesToDB(ctx, []*StatusUpdate{s})
+			if err != nil {
+				log := log.With("msg_id", s.MsgID())
+
+				if qerr := dbutil.AsQueryError(err); qerr != nil {
+					query, params := qerr.Query()
+					log = log.With("sql", query, "sql_params", params)
+				}
+
+				log.Error("error writing msg status", "error", err)
+
+				err := courier.WriteToSpool(spoolDir, "statuses", s)
 				if err != nil {
-					log := logrus.WithField("comp", "status writer").WithField("msg_id", s.ID())
-
-					if qerr := dbutil.AsQueryError(err); qerr != nil {
-						query, params := qerr.Query()
-						log = log.WithFields(logrus.Fields{"sql": query, "sql_params": params})
-					}
-
-					log.WithError(err).Error("error writing msg status")
-
-					err = courier.WriteToSpool(spoolDir, "statuses", s)
-					if err != nil {
-						logrus.WithField("comp", "status committer").WithError(err).Error("error writing status to spool")
-					}
+					log.Error("error writing status to spool", "error", err) // just have to log and move on
 				}
 			}
 		}
+	} else {
+		for _, s := range unresolved {
+			log.Warn(fmt.Sprintf("unable to find message with channel_id=%d and external_id=%s", s.ChannelID_, s.ExternalID_))
+		}
 	}
+}
+
+// writes a batch of msg status updates to the database - messages that can't be resolved are returned and aren't
+// considered an error
+func (b *backend) writeStatusUpdatesToDB(ctx context.Context, statuses []*StatusUpdate) ([]*StatusUpdate, error) {
+	// get the statuses which have external ID instead of a message ID
+	missingID := make([]*StatusUpdate, 0, 500)
+	for _, s := range statuses {
+		if s.MsgID_ == courier.NilMsgID {
+			missingID = append(missingID, s)
+		}
+	}
+
+	// try to resolve channel ID + external ID to message IDs
+	if len(missingID) > 0 {
+		if err := b.resolveStatusUpdateMsgIDs(ctx, missingID); err != nil {
+			return nil, err
+		}
+	}
+
+	resolved := make([]*StatusUpdate, 0, len(statuses))
+	unresolved := make([]*StatusUpdate, 0, len(statuses))
+
+	for _, s := range statuses {
+		if s.MsgID_ != courier.NilMsgID {
+			resolved = append(resolved, s)
+		} else {
+			unresolved = append(unresolved, s)
+		}
+	}
+
+	err := dbutil.BulkQuery(ctx, b.db, sqlUpdateMsgByID, resolved)
+	if err != nil {
+		return nil, errors.Wrap(err, "error updating status")
+	}
+
+	return unresolved, nil
+}
+
+const sqlResolveStatusMsgIDs = `
+SELECT id, channel_id, external_id 
+  FROM msgs_msg 
+ WHERE (channel_id, external_id) IN (VALUES(CAST(:channel_id AS int), :external_id))`
+
+// resolveStatusUpdateMsgIDs tries to resolve msg IDs for the given statuses - if there's no matching channel id + external id pair
+// found for a status, that status will be left with a nil msg ID.
+func (b *backend) resolveStatusUpdateMsgIDs(ctx context.Context, statuses []*StatusUpdate) error {
+	rc := b.redisPool.Get()
+	defer rc.Close()
+
+	chAndExtKeys := make([]string, len(statuses))
+	for i, s := range statuses {
+		chAndExtKeys[i] = fmt.Sprintf("%d|%s", s.ChannelID_, s.ExternalID_)
+	}
+	cachedIDs, err := b.sentExternalIDs.MGet(rc, chAndExtKeys...)
+	if err != nil {
+		// log error but we continue and try to get ids from the database
+		slog.Error("error looking up sent message ids in redis", "error", err)
+	}
+
+	// collect the statuses that couldn't be resolved from cache, update the ones that could
+	notInCache := make([]*StatusUpdate, 0, len(statuses))
+	for i := range cachedIDs {
+		id, err := strconv.Atoi(cachedIDs[i])
+		if err != nil {
+			notInCache = append(notInCache, statuses[i])
+		} else {
+			statuses[i].MsgID_ = courier.MsgID(id)
+		}
+	}
+
+	if len(notInCache) == 0 {
+		return nil
+	}
+
+	// create a mapping of channel id + external id -> status
+	type ext struct {
+		channelID  courier.ChannelID
+		externalID string
+	}
+	statusesByExt := make(map[ext]*StatusUpdate, len(notInCache))
+	for _, s := range statuses {
+		statusesByExt[ext{s.ChannelID_, s.ExternalID_}] = s
+	}
+
+	sql, params, err := dbutil.BulkSQL(b.db, sqlResolveStatusMsgIDs, notInCache)
+	if err != nil {
+		return err
+	}
+
+	rows, err := b.db.QueryContext(ctx, sql, params...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var msgID courier.MsgID
+	var channelID courier.ChannelID
+	var externalID string
+
+	for rows.Next() {
+		if err := rows.Scan(&msgID, &channelID, &externalID); err != nil {
+			return errors.Wrap(err, "error scanning rows")
+		}
+
+		// find the status with this channel ID and external ID and update its msg ID
+		s := statusesByExt[ext{channelID, externalID}]
+		s.MsgID_ = msgID
+	}
+
+	return rows.Err()
 }

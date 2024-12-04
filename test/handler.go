@@ -31,7 +31,7 @@ func (h *mockHandler) UseChannelRouteUUID() bool             { return true }
 func (h *mockHandler) RedactValues(courier.Channel) []string { return []string{"sesame"} }
 
 func (h *mockHandler) GetChannel(ctx context.Context, r *http.Request) (courier.Channel, error) {
-	dmChannel := NewMockChannel("e4bb1578-29da-4fa5-a214-9da19dd24230", "MCK", "2020", "US", map[string]interface{}{})
+	dmChannel := NewMockChannel("e4bb1578-29da-4fa5-a214-9da19dd24230", "MCK", "2020", "US", map[string]any{})
 	return dmChannel, nil
 }
 
@@ -44,7 +44,7 @@ func (h *mockHandler) Initialize(s courier.Server) error {
 }
 
 // Send sends the given message, logging any HTTP calls or errors
-func (h *mockHandler) Send(ctx context.Context, msg courier.Msg, clog *courier.ChannelLog) (courier.MsgStatus, error) {
+func (h *mockHandler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
 	// log a request that contains a header value that should be redacted
 	req, _ := httpx.NewRequest("GET", "http://mock.com/send", nil, map[string]string{"Authorization": "Token sesame"})
 	trace, _ := httpx.DoTrace(http.DefaultClient, req, nil, nil, 1024)
@@ -53,14 +53,14 @@ func (h *mockHandler) Send(ctx context.Context, msg courier.Msg, clog *courier.C
 	// log an error than contains a value that should be redacted
 	clog.Error(courier.NewChannelError("seeds", "", "contains sesame seeds"))
 
-	return h.backend.NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgSent, clog), nil
+	return h.backend.NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusSent, clog), nil
 }
 
-func (h *mockHandler) WriteStatusSuccessResponse(ctx context.Context, w http.ResponseWriter, statuses []courier.MsgStatus) error {
+func (h *mockHandler) WriteStatusSuccessResponse(ctx context.Context, w http.ResponseWriter, statuses []courier.StatusUpdate) error {
 	return courier.WriteStatusSuccess(w, statuses)
 }
 
-func (h *mockHandler) WriteMsgSuccessResponse(ctx context.Context, w http.ResponseWriter, msgs []courier.Msg) error {
+func (h *mockHandler) WriteMsgSuccessResponse(ctx context.Context, w http.ResponseWriter, msgs []courier.MsgIn) error {
 	return courier.WriteMsgSuccess(w, msgs)
 }
 

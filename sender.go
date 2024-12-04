@@ -3,10 +3,10 @@ package courier
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/nyaruka/gocommon/analytics"
-	"github.com/sirupsen/logrus"
 )
 
 // Foreman takes care of managing our set of sending workers and assigns msgs for each to send
@@ -47,7 +47,7 @@ func (f *Foreman) Stop() {
 		sender.Stop()
 	}
 	close(f.quit)
-	logrus.WithField("comp", "foreman").WithField("state", "stopping").Info("foreman stopping")
+	slog.Info("foreman stopping", "comp", "foreman", "state", "stopping")
 }
 
 // Assign is our main loop for the Foreman, it takes care of popping the next outgoing messages from our
@@ -55,12 +55,11 @@ func (f *Foreman) Stop() {
 func (f *Foreman) Assign() {
 	f.server.WaitGroup().Add(1)
 	defer f.server.WaitGroup().Done()
-	log := logrus.WithField("comp", "foreman")
+	log := slog.With("comp", "foreman")
 
-	log.WithFields(logrus.Fields{
-		"state":   "started",
-		"senders": len(f.senders),
-	}).Info("senders started and waiting")
+	log.Info("senders started and waiting",
+		"state", "started",
+		"senders", len(f.senders))
 
 	backend := f.server.Backend()
 	lastSleep := false
@@ -69,7 +68,7 @@ func (f *Foreman) Assign() {
 		select {
 		// return if we have been told to stop
 		case <-f.quit:
-			log.WithField("state", "stopped").Info("foreman stopped")
+			log.Info("foreman stopped", "state", "stopped")
 			return
 
 		// otherwise, grab the next msg and assign it to a sender
@@ -86,7 +85,7 @@ func (f *Foreman) Assign() {
 			} else {
 				// we received an error getting the next message, log it
 				if err != nil {
-					log.WithError(err).Error("error popping outgoing msg")
+					log.Error("error popping outgoing msg", "error", err)
 				}
 
 				// add our sender back to our queue and sleep a bit
@@ -105,7 +104,7 @@ func (f *Foreman) Assign() {
 type Sender struct {
 	id      int
 	foreman *Foreman
-	job     chan Msg
+	job     chan MsgOut
 }
 
 // NewSender creates a new sender responsible for sending messages
@@ -113,7 +112,7 @@ func NewSender(foreman *Foreman, id int) *Sender {
 	sender := &Sender{
 		id:      id,
 		foreman: foreman,
-		job:     make(chan Msg, 1),
+		job:     make(chan MsgOut, 1),
 	}
 	return sender
 }
@@ -124,10 +123,7 @@ func (w *Sender) Start() {
 
 	go func() {
 		defer w.foreman.server.WaitGroup().Done()
-
-		log := logrus.WithField("comp", "sender").WithField("sender_id", w.id)
-		log.Debug("started")
-
+		slog.Debug("started", "comp", "sender", "sender_id", w.id)
 		for {
 			// list ourselves as available for work
 			w.foreman.availableSenders <- w
@@ -137,7 +133,7 @@ func (w *Sender) Start() {
 
 			// exit if we were stopped
 			if msg == nil {
-				log.Debug("stopped")
+				slog.Debug("stopped")
 				return
 			}
 
@@ -151,8 +147,9 @@ func (w *Sender) Stop() {
 	close(w.job)
 }
 
-func (w *Sender) sendMessage(msg Msg) {
-	log := logrus.WithField("comp", "sender").WithField("sender_id", w.id).WithField("channel_uuid", msg.Channel().UUID())
+func (w *Sender) sendMessage(msg MsgOut) {
+
+	log := slog.With("comp", "sender", "sender_id", w.id, "channel_uuid", msg.Channel().UUID())
 
 	server := w.foreman.server
 	backend := server.Backend()
@@ -161,12 +158,12 @@ func (w *Sender) sendMessage(msg Msg) {
 	sendCTX, cancel := context.WithTimeout(context.Background(), time.Second*35)
 	defer cancel()
 
-	log = log.WithField("msg_id", msg.ID()).WithField("msg_text", msg.Text()).WithField("msg_urn", msg.URN().Identity())
+	log = log.With("msg_id", msg.ID(), "msg_text", msg.Text(), "msg_urn", msg.URN().Identity())
 	if len(msg.Attachments()) > 0 {
-		log = log.WithField("attachments", msg.Attachments())
+		log = log.With("attachments", msg.Attachments())
 	}
 	if len(msg.QuickReplies()) > 0 {
-		log = log.WithField("quick_replies", msg.QuickReplies())
+		log = log.With("quick_replies", msg.QuickReplies())
 	}
 
 	start := time.Now()
@@ -175,7 +172,7 @@ func (w *Sender) sendMessage(msg Msg) {
 	if msg.IsResend() {
 		err := backend.ClearMsgSent(sendCTX, msg.ID())
 		if err != nil {
-			log.WithError(err).Error("error clearing sent status for msg")
+			log.Error("error clearing sent status for msg", "error", err)
 		}
 	}
 
@@ -184,10 +181,10 @@ func (w *Sender) sendMessage(msg Msg) {
 
 	// failing on a lookup isn't a halting problem but we should log it
 	if err != nil {
-		log.WithError(err).Error("error looking up msg was sent")
+		log.Error("error looking up msg was sent", "error", err)
 	}
 
-	var status MsgStatus
+	var status StatusUpdate
 	var redactValues []string
 	handler := server.GetHandler(msg.Channel())
 	if handler != nil {
@@ -198,13 +195,13 @@ func (w *Sender) sendMessage(msg Msg) {
 
 	if handler == nil {
 		// if there's no handler, create a FAILED status for it
-		status = backend.NewMsgStatusForID(msg.Channel(), msg.ID(), MsgFailed, clog)
-		log.Errorf("unable to find handler for channel type: %s", msg.Channel().ChannelType())
+		status = backend.NewStatusUpdate(msg.Channel(), msg.ID(), MsgStatusFailed, clog)
+		log.Error(fmt.Sprintf("unable to find handler for channel type: %s", msg.Channel().ChannelType()))
 
 	} else if sent {
 		// if this message was already sent, create a WIRED status for it
-		status = backend.NewMsgStatusForID(msg.Channel(), msg.ID(), MsgWired, clog)
-		log.Warning("duplicate send, marking as wired")
+		status = backend.NewStatusUpdate(msg.Channel(), msg.ID(), MsgStatusWired, clog)
+		log.Warn("duplicate send, marking as wired")
 
 	} else {
 		// send our message
@@ -213,7 +210,7 @@ func (w *Sender) sendMessage(msg Msg) {
 		secondDuration := float64(duration) / float64(time.Second)
 
 		if err != nil {
-			log.WithError(err).WithField("elapsed", duration).Error("error sending message")
+			log.Error("error sending message", "error", err, "elapsed", duration)
 
 			// handlers should log errors implicitly with user friendly messages.. but if not.. add what we have
 			if len(clog.Errors()) == 0 {
@@ -222,16 +219,16 @@ func (w *Sender) sendMessage(msg Msg) {
 
 			// possible for handlers to only return an error in which case we construct an error status
 			if status == nil {
-				status = backend.NewMsgStatusForID(msg.Channel(), msg.ID(), MsgErrored, clog)
+				status = backend.NewStatusUpdate(msg.Channel(), msg.ID(), MsgStatusErrored, clog)
 			}
 		}
 
 		// report to librato and log locally
-		if status.Status() == MsgErrored || status.Status() == MsgFailed {
-			log.WithField("elapsed", duration).Warning("msg errored")
+		if status.Status() == MsgStatusErrored || status.Status() == MsgStatusFailed {
+			log.Warn("msg errored", "elapsed", duration)
 			analytics.Gauge(fmt.Sprintf("courier.msg_send_error_%s", msg.Channel().ChannelType()), secondDuration)
 		} else {
-			log.WithField("elapsed", duration).Info("msg sent")
+			log.Debug("msg sent", "elapsed", duration)
 			analytics.Gauge(fmt.Sprintf("courier.msg_send_%s", msg.Channel().ChannelType()), secondDuration)
 		}
 	}
@@ -240,9 +237,9 @@ func (w *Sender) sendMessage(msg Msg) {
 	writeCTX, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	err = backend.WriteMsgStatus(writeCTX, status)
+	err = backend.WriteStatusUpdate(writeCTX, status)
 	if err != nil {
-		log.WithError(err).Info("error writing msg status")
+		log.Info("error writing msg status", "error", err)
 	}
 
 	clog.End()
@@ -250,7 +247,7 @@ func (w *Sender) sendMessage(msg Msg) {
 	// write our logs as well
 	err = backend.WriteChannelLog(writeCTX, clog)
 	if err != nil {
-		log.WithError(err).Info("error writing msg logs")
+		log.Info("error writing msg logs", "error", err)
 	}
 
 	// mark our send task as complete
