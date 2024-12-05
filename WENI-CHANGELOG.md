@@ -1,3 +1,7 @@
+1.5.8-courier-8.2.1
+----------
+  * Remove menu button name mapping
+
 1.5.7-courier-8.2.1
 ----------
   * Update to v8.2.1
