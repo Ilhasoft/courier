@@ -35,9 +35,7 @@ var (
 	maxRequestBodyBytes int64 = 1024 * 1024
 
 	// max for the body
-	maxMsgLengthIG  = 1000
-	maxMsgLengthFBA = 2000
-	maxMsgLengthWAC = 4096
+	maxMsgLength = 1000
 
 	// Sticker ID substitutions
 	stickerIDToEmoji = map[int64]string{
@@ -836,11 +834,11 @@ func (h *handler) sendFacebookInstagramMsg(ctx context.Context, msg courier.MsgO
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json")
-			_, _, err = handlers.RequestHTTP(req, clog)
+			_, _, err = h.RequestHTTP(req, clog)
 			if err != nil {
 				return status, nil
 			}
-			status.SetStatus(courier.MsgWired)
+			status.SetStatus(courier.MsgStatusWired)
 		}
 		return status, nil
 	}
@@ -974,7 +972,7 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 
 	msgParts := make([]string, 0)
 	if msg.Text() != "" {
-		msgParts = handlers.SplitMsgByChannel(msg.Channel(), msg.Text(), maxMsgLengthWAC)
+		msgParts = handlers.SplitMsgByChannel(msg.Channel(), msg.Text(), maxMsgLength)
 	}
 	qrs := msg.QuickReplies()
 	menuButton := handlers.GetText("Menu", msg.Locale())
@@ -1214,7 +1212,7 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 								zeroIndex = true
 							}
 							payloadAudio = whatsapp.SendRequest{MessagingProduct: "whatsapp", RecipientType: "individual", To: msg.URN().Path(), Type: "audio", Audio: &whatsapp.Media{Link: attURL}}
-							err := h.requestWAC(payloadAudio, accessToken, status, wacPhoneURL, zeroIndex, clog)
+							_, err := h.requestWAC(payloadAudio, accessToken, status, wacPhoneURL, zeroIndex, clog)
 							if err != nil {
 								return status, nil
 							}
@@ -1299,7 +1297,7 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 			zeroIndex = true
 		}
 
-		err := h.requestWAC(payload, accessToken, status, wacPhoneURL, zeroIndex, clog)
+		respPayload, err := h.requestWAC(payload, accessToken, status, wacPhoneURL, zeroIndex, clog)
 		if err != nil {
 			return status, err
 		}
@@ -1311,13 +1309,14 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 				if err != nil {
 					return status, nil
 				}
-				err = status.SetUpdatedURN(msg.URN(), toUpdateURN)
+				err = status.SetURNUpdate(msg.URN(), toUpdateURN)
 				if err != nil {
 					clog.Error(courier.ErrorResponseUnexpected("unable to update contact URN for a new based on wa_id"))
 				}
 				hasNewURN = true
 			}
 		}
+
 		if hasTemplate && len(msg.Attachments()) > 0 || hasCaption {
 			break
 		}
@@ -1325,12 +1324,12 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 	return status, nil
 }
 
-func (h *handler) requestWAC(payload whatsapp.SendRequest, accessToken string, status courier.StatusUpdate, wacPhoneURL *url.URL, zeroIndex bool, clog *courier.ChannelLog) error {
+func (h *handler) requestWAC(payload whatsapp.SendRequest, accessToken string, status courier.StatusUpdate, wacPhoneURL *url.URL, zeroIndex bool, clog *courier.ChannelLog) (*whatsapp.SendResponse, error) {
 	jsonBody := jsonx.MustMarshal(payload)
 
 	req, err := http.NewRequest(http.MethodPost, wacPhoneURL.String(), bytes.NewReader(jsonBody))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
@@ -1342,21 +1341,22 @@ func (h *handler) requestWAC(payload whatsapp.SendRequest, accessToken string, s
 	err = json.Unmarshal(respBody, respPayload)
 	if err != nil {
 		clog.Error(courier.ErrorResponseUnparseable("JSON"))
-		return nil
+		return respPayload, nil
 	}
 
 	if respPayload.Error.Code != 0 {
 		clog.Error(courier.ErrorExternal(strconv.Itoa(respPayload.Error.Code), respPayload.Error.Message))
-		return nil
+		return respPayload, nil
 	}
 
 	externalID := respPayload.Messages[0].ID
 	if zeroIndex && externalID != "" {
 		status.SetExternalID(externalID)
 	}
+
 	// this was wired successfully
 	status.SetStatus(courier.MsgStatusWired)
-	return nil
+	return respPayload, nil
 }
 
 // DescribeURN looks up URN metadata for new contacts

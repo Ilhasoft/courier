@@ -58,6 +58,15 @@ type SendResponse struct {
 	} `json:"error"`
 }
 
+type FeedbackQuestion struct {
+	Type     string `json:"type"`
+	Payload  string `json:"payload"`
+	FollowUp *struct {
+		Type    string `json:"type"`
+		Payload string `json:"payload"`
+	} `json:"follow_up"`
+}
+
 // see https://developers.facebook.com/docs/messenger-platform/webhooks/#event-notifications
 type Messaging struct {
 	Sender *struct {

@@ -170,7 +170,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	}
 
 	if len(msg.QuickReplies()) != 0 {
-		_, err := sendQuickReplies(msg, botToken, clog)
+		_, err := h.sendQuickReplies(msg, botToken, clog)
 		if err != nil {
 			clog.RawError(err)
 			return status, nil
@@ -297,7 +297,7 @@ func (h *handler) sendFilePart(msg courier.MsgOut, token string, fileParams *Fil
 
 	return nil
 }
-func sendQuickReplies(msg courier.Msg, botToken string, clog *courier.ChannelLog) (*courier.ChannelLog, error) {
+func (h *handler) sendQuickReplies(msg courier.MsgOut, botToken string, clog *courier.ChannelLog) (*courier.ChannelLog, error) {
 	sendURL := apiURL + "/chat.postMessage"
 
 	payload := &mtPayload{
@@ -345,7 +345,7 @@ func sendQuickReplies(msg courier.Msg, botToken string, clog *courier.ChannelLog
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", botToken))
 
-	resp, respBody, err := handlers.RequestHTTP(req, clog)
+	resp, respBody, err := h.RequestHTTP(req, clog)
 	if err != nil || resp.StatusCode/100 != 2 {
 		return clog, errors.New("error uploading file to slack")
 	}

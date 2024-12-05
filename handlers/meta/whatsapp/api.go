@@ -237,4 +237,8 @@ type SendResponse struct {
 		Message string `json:"message"`
 		Code    int    `json:"code"`
 	} `json:"error"`
+	Contacts []*struct {
+		Input string `json:"input,omitempty"`
+		WaID  string `json:"wa_id,omitempty"`
+	} `json:"contacts,omitempty"`
 }

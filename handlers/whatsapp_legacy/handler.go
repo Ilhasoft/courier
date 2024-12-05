@@ -183,12 +183,12 @@ type eventsPayload struct {
 func checkBlockedContact(payload *eventsPayload, ctx context.Context, channel courier.Channel, h *handler, clog *courier.ChannelLog) error {
 	if len(payload.Contacts) > 0 {
 		if contactURN, err := urns.NewWhatsAppURN(payload.Contacts[0].WaID); err == nil {
-			if contact, err := h.Backend().GetContact(ctx, channel, contactURN, channel.StringConfigForKey(courier.ConfigAuthToken, ""), payload.Contacts[0].Profile.Name, clog); err == nil {
+			if contact, err := h.Backend().GetContact(ctx, channel, contactURN, nil, payload.Contacts[0].Profile.Name, clog); err == nil {
 				c, err := json.Marshal(contact)
 				if err != nil {
 					return err
 				}
-				var dbc rapidpro.DBContact
+				var dbc rapidpro.Contact
 				if err = json.Unmarshal(c, &dbc); err != nil {
 					return err
 				}
@@ -893,7 +893,7 @@ func buildPayloads(msg courier.MsgOut, h *handler, clog *courier.ChannelLog) ([]
 							payload.Interactive.Type = "list"
 							payload.Interactive.Body.Text = part
 							if msg.Locale() != "" {
-								payload.Interactive.Action.Button = langCode
+								payload.Interactive.Action.Button = "Menu"
 							} else {
 								payload.Interactive.Action.Button = "Menu"
 							}

@@ -74,7 +74,7 @@ const (
 	`
 )
 
-var testCases = []ChannelHandleTestCase{
+var testCases = []IncomingTestCase{
 	{
 		Label:                "Receive Valid Text Msg",
 		URL:                  receiveURL,
@@ -135,8 +135,8 @@ var testCases = []ChannelHandleTestCase{
 	},
 }
 
-func TestHandler(t *testing.T) {
-	RunChannelTestCases(t, testChannels, newHandler(), testCases)
+func TestIncoming(t *testing.T) {
+	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
 }
 
 func BenchmarkHandler(b *testing.B) {
@@ -145,13 +145,13 @@ func BenchmarkHandler(b *testing.B) {
 
 // SendMsg test
 
-func prepareSendMsg(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.Msg) {
+func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
 	c.(*test.MockChannel).SetConfig(courier.ConfigBaseURL, s.URL)
 	timestamp = "1616700878"
 }
 
-func mockAttachmentURLs(mediaServer *httptest.Server, testCases []ChannelSendTestCase) []ChannelSendTestCase {
-	casesWithMockedUrls := make([]ChannelSendTestCase, len(testCases))
+func mockAttachmentURLs(mediaServer *httptest.Server, testCases []OutgoingTestCase) []OutgoingTestCase {
+	casesWithMockedUrls := make([]OutgoingTestCase, len(testCases))
 
 	for i, testCase := range testCases {
 		mockedCase := testCase
@@ -164,38 +164,38 @@ func mockAttachmentURLs(mediaServer *httptest.Server, testCases []ChannelSendTes
 	return casesWithMockedUrls
 }
 
-var sendTestCases = []ChannelSendTestCase{
+var sendTestCases = []OutgoingTestCase{
 	{
 		Label:               "Plain Send",
 		MsgText:             "Simple Message",
 		MsgURN:              "ext:371298371241",
-		ExpectedMsgStatus:   courier.MsgSent,
+		ExpectedMsgStatus:   courier.MsgStatusSent,
 		ExpectedRequestPath: "/send",
 		ExpectedHeaders:     map[string]string{"Content-type": "application/json"},
 		ExpectedRequestBody: `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"Simple Message"}}`,
 		MockResponseStatus:  200,
-		SendPrep:            prepareSendMsg,
+		SendPrep:            setSendURL,
 	},
 	{
 		Label:               "Unicode Send",
 		MsgText:             "☺",
 		MsgURN:              "ext:371298371241",
-		ExpectedMsgStatus:   courier.MsgSent,
+		ExpectedMsgStatus:   courier.MsgStatusSent,
 		ExpectedRequestPath: "/send",
 		ExpectedHeaders:     map[string]string{"Content-type": "application/json"},
 		ExpectedRequestBody: `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"☺"}}`,
 		MockResponseStatus:  200,
-		SendPrep:            prepareSendMsg,
+		SendPrep:            setSendURL,
 	},
 	{
 		Label:               "invalid Text Send",
 		MsgText:             "Error",
 		MsgURN:              "ext:371298371241",
-		ExpectedMsgStatus:   courier.MsgFailed,
+		ExpectedMsgStatus:   courier.MsgStatusFailed,
 		ExpectedRequestPath: "/send",
 		ExpectedHeaders:     map[string]string{"Content-type": "application/json"},
 		ExpectedRequestBody: `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"Error"}}`,
-		SendPrep:            prepareSendMsg,
+		SendPrep:            setSendURL,
 	},
 	{
 		Label:   "Medias Send",
@@ -207,41 +207,41 @@ var sendTestCases = []ChannelSendTestCase{
 			"video/mp4:https://foo.bar/video.mp4",
 		},
 		MsgURN:             "ext:371298371241",
-		ExpectedMsgStatus:  courier.MsgSent,
+		ExpectedMsgStatus:  courier.MsgStatusSent,
 		MockResponseStatus: 200,
-		SendPrep:           prepareSendMsg,
+		SendPrep:           setSendURL,
 	},
 	{
 		Label:              "Invalid Media Type Send",
 		MsgText:            "Medias",
 		MsgAttachments:     []string{"foo/bar:https://foo.bar/foo.bar"},
 		MsgURN:             "ext:371298371241",
-		ExpectedMsgStatus:  courier.MsgFailed,
+		ExpectedMsgStatus:  courier.MsgStatusFailed,
 		MockResponseStatus: 400,
-		SendPrep:           prepareSendMsg,
+		SendPrep:           setSendURL,
 	},
 	{
 		Label:             "Invalid Media Send",
 		MsgText:           "Medias",
 		MsgAttachments:    []string{"image/png:https://foo.bar/image.png"},
 		MsgURN:            "ext:371298371241",
-		ExpectedMsgStatus: courier.MsgFailed,
-		SendPrep:          prepareSendMsg,
+		ExpectedMsgStatus: courier.MsgStatusFailed,
+		SendPrep:          setSendURL,
 	},
 	{
 		Label:              "No Timestamp Prepare",
 		MsgText:            "No prepare",
 		MsgURN:             "ext:371298371241",
-		ExpectedMsgStatus:  courier.MsgSent,
+		ExpectedMsgStatus:  courier.MsgStatusSent,
 		MockResponseStatus: 200,
-		SendPrep: func(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.Msg) {
+		SendPrep: func(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
 			c.(*test.MockChannel).SetConfig(courier.ConfigBaseURL, s.URL)
 			timestamp = ""
 		},
 	},
 }
 
-func TestSending(t *testing.T) {
+func TestOutgoing(t *testing.T) {
 	mediaServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		defer req.Body.Close()
 		res.WriteHeader(200)
@@ -251,5 +251,5 @@ func TestSending(t *testing.T) {
 	mockedSendTestCases := mockAttachmentURLs(mediaServer, sendTestCases)
 	mediaServer.Close()
 
-	RunChannelSendTestCases(t, testChannels[0], newHandler(), mockedSendTestCases, nil, nil)
+	RunOutgoingTestCases(t, testChannels[0], newHandler(), mockedSendTestCases, nil, nil)
 }
