@@ -7,13 +7,13 @@ RUN go mod download -x
 
 COPY . ./
 
-RUN GOOS=linux GOARCH=amd64 go build -o /bin/mailroom ./cmd/mailroom/*.go
+RUN GOOS=linux GOARCH=amd64 go build -o /bin/courier ./cmd/courier/*.go
 
 FROM gcr.io/distroless/base-debian12
 
 WORKDIR /app
 
-COPY --from=builder bin/mailroom ./
+COPY --from=builder bin/courier ./
 
-EXPOSE 8090
+EXPOSE 8080
 ENTRYPOINT ["./courier"]
