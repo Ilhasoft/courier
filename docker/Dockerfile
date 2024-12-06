@@ -1,20 +1,19 @@
-FROM golang:1.21.5-alpine
+FROM golang:1.23-bookworm AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download -x
+
+COPY . ./
+
+RUN GOOS=linux GOARCH=amd64 go build -o /bin/mailroom ./cmd/mailroom/*.go
+
+FROM gcr.io/distroless/base-debian12
 
 WORKDIR /app
 
-RUN apk update \
-  && apk add --virtual build-deps gcc git \
-  && rm -rf /var/cache/apk/*
+COPY --from=builder bin/mailroom ./
 
-RUN addgroup -S golang \
-  && adduser -S -G golang golang
-
-COPY . .
-
-RUN go install -v ./cmd/...
-RUN chown -R golang /app
-
-USER golang
-
-EXPOSE 8080
-ENTRYPOINT ["courier"]
+EXPOSE 8090
+ENTRYPOINT ["./courier"]
