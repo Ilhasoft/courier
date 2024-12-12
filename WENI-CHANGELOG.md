@@ -1,7 +1,11 @@
-1.5.8-courier-9.0.1
+1.5.9-courier-9.0.1
 ----------
   * Update to v9.0.1
   * Update dockerfile
+
+1.5.8-courier-8.2.1
+----------
+  * Remove menu button name mapping
 
 1.5.7-courier-8.2.1
 ----------

@@ -892,11 +892,7 @@ func buildPayloads(msg courier.MsgOut, h *handler, clog *courier.ChannelLog) ([]
 						} else {
 							payload.Interactive.Type = "list"
 							payload.Interactive.Body.Text = part
-							if msg.Locale() != "" {
-								payload.Interactive.Action.Button = "Menu"
-							} else {
-								payload.Interactive.Action.Button = "Menu"
-							}
+							payload.Interactive.Action.Button = "Menu"
 							section := mtSection{
 								Rows: make([]mtSectionRow, len(qrs)),
 							}
@@ -1344,34 +1340,4 @@ var supportedLanguages = map[i18n.Locale]string{
 	"uzb":    "uz",    // Uzbek
 	"vie":    "vi",    // Vietnamese
 	"zul":    "zu",    // Zulu
-}
-
-// iso language code mapping to respective "Menu" word translation
-var languageMenuMap = map[string]string{
-	"da-DK": "Menu",
-	"de-DE": "Speisekarte",
-	"en-AU": "Menu",
-	"en-CA": "Menu",
-	"en-GB": "Menu",
-	"en-IN": "Menu",
-	"en-US": "Menu",
-	"ca-ES": "Menú",
-	"es-ES": "Menú",
-	"es-MX": "Menú",
-	"fi-FI": "Valikko",
-	"fr-CA": "Menu",
-	"fr-FR": "Menu",
-	"it-IT": "Menù",
-	"ja-JP": "メニュー",
-	"ko-KR": "메뉴",
-	"nb-NO": "Meny",
-	"nl-NL": "Menu",
-	"pl-PL": "Menu",
-	"pt-BR": "Menu",
-	"ru-RU": "Меню",
-	"sv-SE": "Meny",
-	"zh-CN": "菜单",
-	"zh-HK": "菜單",
-	"zh-TW": "菜單",
-	"ar-JO": "قائمة",
 }
