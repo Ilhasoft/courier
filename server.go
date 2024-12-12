@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -21,7 +22,6 @@ import (
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // for use in request.Context
@@ -56,13 +56,13 @@ type Server interface {
 // afterwards, which is when configuration options are checked.
 func NewServer(config *Config, backend Backend) Server {
 	// create our top level router
-	logger := logrus.New()
+	logger := slog.Default()
 	return NewServerWithLogger(config, backend, logger)
 }
 
 // NewServerWithLogger creates a new Server for the passed in configuration. The server will have to be started
 // afterwards, which is when configuration options are checked.
-func NewServerWithLogger(config *Config, backend Backend, logger *logrus.Logger) Server {
+func NewServerWithLogger(config *Config, backend Backend, logger *slog.Logger) Server {
 	router := chi.NewRouter()
 	router.Use(middleware.Compress(flate.DefaultCompression))
 	router.Use(middleware.StripSlashes)
@@ -91,9 +91,6 @@ func NewServerWithLogger(config *Config, backend Backend, logger *logrus.Logger)
 // if it encounters any unrecoverable (or ignorable) error, though its bias is to move forward despite
 // connection errors
 func (s *server) Start() error {
-	// set our user agent, needs to happen before we do anything so we don't change have threading issues
-	utils.HTTPUserAgent = fmt.Sprintf("Courier/%s", s.config.Version)
-
 	// configure librato if we have configuration options for it
 	host, _ := os.Hostname()
 	if s.config.LibratoUsername != "" {
@@ -137,7 +134,7 @@ func (s *server) Start() error {
 		defer s.waitGroup.Done()
 		err := s.httpServer.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			logrus.WithFields(logrus.Fields{"comp": "server", "state": "stopping"}).Error(err)
+			slog.Error("failed to start server", "error", err, "comp", "server", "state", "stopping")
 		}
 	}()
 
@@ -154,18 +151,18 @@ func (s *server) Start() error {
 			case <-time.After(time.Minute):
 				err := s.backend.Heartbeat()
 				if err != nil {
-					logrus.WithError(err).Error("error running backend heartbeat")
+					slog.Error("error running backend heartbeat", "error", err)
 				}
 			}
 		}
 	}()
 
-	logrus.WithFields(logrus.Fields{
-		"comp":    "server",
-		"port":    s.config.Port,
-		"state":   "started",
-		"version": s.config.Version,
-	}).Info("server listening on ", s.config.Port)
+	slog.Info(fmt.Sprintf("server listening on %d", s.config.Port),
+		"comp", "server",
+		"port", s.config.Port,
+		"state", "started",
+		"version", s.config.Version,
+	)
 
 	// start our foreman for outgoing messages
 	s.foreman = NewForeman(s, s.config.MaxWorkers)
@@ -176,15 +173,15 @@ func (s *server) Start() error {
 
 // Stop stops the server, returning only after all threads have stopped
 func (s *server) Stop() error {
-	log := logrus.WithField("comp", "server")
-	log.WithField("state", "stopping").Info("stopping server")
+	log := slog.With("comp", "server")
+	log.Info("stopping server", "state", "stopping")
 
 	// stop our foreman
 	s.foreman.Stop()
 
 	// shut down our HTTP server
 	if err := s.httpServer.Shutdown(context.Background()); err != nil {
-		log.WithField("state", "stopping").WithError(err).Error("error shutting down server")
+		log.Error("error shutting down server", "error", err, "state", "stopping")
 	}
 
 	// stop everything
@@ -204,8 +201,7 @@ func (s *server) Stop() error {
 
 	// clean things up, tearing down any connections
 	s.backend.Cleanup()
-
-	log.WithField("state", "stopped").Info("server stopped")
+	log.Info("server stopped", "state", "stopped")
 	return nil
 }
 
@@ -251,7 +247,7 @@ func (s *server) initializeChannelHandlers() {
 			}
 			activeHandlers[handler.ChannelType()] = handler
 
-			logrus.WithField("comp", "server").WithField("handler", handler.ChannelName()).WithField("handler_type", channelType).Info("handler initialized")
+			slog.Info("handler initialized", "comp", "server", "handler", handler.ChannelName(), "handler_type", channelType)
 		}
 	}
 
@@ -295,7 +291,7 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 			panicLog := recover()
 			if panicLog != nil {
 				debug.PrintStack()
-				logrus.WithError(err).WithField("channel_uuid", channelUUID).WithField("request", string(recorder.Trace.RequestTrace)).WithField("trace", panicLog).Error("panic handling request")
+				slog.Error("panic handling request", "error", err, "channel_uuid", channelUUID, "request", recorder.Trace.RequestTrace, "trace", panicLog)
 				writeAndLogRequestError(ctx, handler, recorder.ResponseWriter, r, channel, errors.New("panic handling msg"))
 			}
 		}()
@@ -308,13 +304,13 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 
 		// if we received an error, write it out and report it
 		if hErr != nil {
-			logrus.WithError(hErr).WithField("channel_uuid", channelUUID).WithField("request", string(recorder.Trace.RequestTrace)).Error("error handling request")
+			slog.Error("error handling request", "error", err, "channel_uuid", channelUUID, "request", recorder.Trace.RequestTrace)
 			writeAndLogRequestError(ctx, handler, recorder.ResponseWriter, r, channel, hErr)
 		}
 
 		// end recording of the request so that we have a response trace
 		if err := recorder.End(); err != nil {
-			logrus.WithError(err).WithField("channel_uuid", channelUUID).WithField("request", string(recorder.Trace.RequestTrace)).Error("error recording request")
+			slog.Error("error recording request", "error", err, "channel_uuid", channelUUID, "request", recorder.Trace.RequestTrace)
 			writeAndLogRequestError(ctx, handler, w, r, channel, err)
 		}
 
@@ -330,12 +326,12 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 
 			for _, event := range events {
 				switch e := event.(type) {
-				case Msg:
-					clog.SetMsgID(e.ID())
+				case MsgIn:
+					clog.SetAttached(true)
 					analytics.Gauge(fmt.Sprintf("courier.msg_receive_%s", channel.ChannelType()), secondDuration)
 					LogMsgReceived(r, e)
-				case MsgStatus:
-					clog.SetMsgID(e.ID())
+				case StatusUpdate:
+					clog.SetAttached(true)
 					analytics.Gauge(fmt.Sprintf("courier.msg_status_%s", channel.ChannelType()), secondDuration)
 					LogMsgStatusReceived(r, e)
 				case ChannelEvent:
@@ -347,8 +343,11 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 			clog.End()
 
 			if err := s.backend.WriteChannelLog(ctx, clog); err != nil {
-				logrus.WithError(err).Error("error writing channel log")
+				slog.Error("error writing channel log", "error", err)
 			}
+		} else {
+			slog.Info("non-channel specific request", "error", err, "channel_type", handler.ChannelType(), "request", recorder.Trace.RequestTrace, "status", recorder.Trace.Response.StatusCode)
+
 		}
 	}
 }
@@ -399,7 +398,7 @@ func (s *server) handleFetchAttachment(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := fetchAttachment(ctx, s.backend, r)
 	if err != nil {
-		logrus.WithError(err).Error()
+		slog.Error("error fetching attachment", "error", err)
 		WriteError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -410,20 +409,21 @@ func (s *server) handleFetchAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handle404(w http.ResponseWriter, r *http.Request) {
-	logrus.WithField("url", r.URL.String()).WithField("method", r.Method).WithField("resp_status", "404").Info("not found")
-	errors := []interface{}{NewErrorData(fmt.Sprintf("not found: %s", r.URL.String()))}
+	slog.Info("not found", "url", r.URL.String(), "method", r.Method, "resp_status", "404")
+	errors := []any{NewErrorData(fmt.Sprintf("not found: %s", r.URL.String()))}
 	err := WriteDataResponse(w, http.StatusNotFound, "Not Found", errors)
 	if err != nil {
-		logrus.WithError(err).Error()
+		slog.Error("error writing response", "error", err)
 	}
 }
 
 func (s *server) handle405(w http.ResponseWriter, r *http.Request) {
-	logrus.WithField("url", r.URL.String()).WithField("method", r.Method).WithField("resp_status", "405").Info("invalid method")
-	errors := []interface{}{NewErrorData(fmt.Sprintf("method not allowed: %s", r.Method))}
+	slog.Info("invalid method", "url", r.URL.String(), "method", r.Method, "resp_status", "405")
+	errors := []any{NewErrorData(fmt.Sprintf("method not allowed: %s", r.Method))}
 	err := WriteDataResponse(w, http.StatusMethodNotAllowed, "Method Not Allowed", errors)
 	if err != nil {
-		logrus.WithError(err).Error()
+		slog.Error("error writing response", "error", err)
+
 	}
 }
 

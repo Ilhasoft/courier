@@ -40,11 +40,11 @@ func TestHandling(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// create and add a new outgoing message
-	brokenChannel := test.NewMockChannel("53e5aafa-8155-449d-9009-fcb30d54bd26", "XX", "2020", "US", map[string]interface{}{})
-	mockChannel := test.NewMockChannel("e4bb1578-29da-4fa5-a214-9da19dd24230", "MCK", "2020", "US", map[string]interface{}{})
+	brokenChannel := test.NewMockChannel("53e5aafa-8155-449d-9009-fcb30d54bd26", "XX", "2020", "US", map[string]any{})
+	mockChannel := test.NewMockChannel("e4bb1578-29da-4fa5-a214-9da19dd24230", "MCK", "2020", "US", map[string]any{})
 	mb.AddChannel(mockChannel)
 
-	msg := test.NewMockMsg(courier.MsgID(101), courier.NilMsgUUID, brokenChannel, "tel:+250788383383", "test message")
+	msg := test.NewMockMsg(courier.MsgID(101), courier.NilMsgUUID, brokenChannel, "tel:+250788383383", "test message", nil)
 	mb.PushOutgoingMsg(msg)
 
 	// sleep a second, sender should take care of it in that time
@@ -52,14 +52,14 @@ func TestHandling(t *testing.T) {
 
 	// message should have failed because we don't have a registered handler
 	assert.Equal(1, len(mb.WrittenMsgStatuses()))
-	assert.Equal(msg.ID(), mb.WrittenMsgStatuses()[0].ID())
-	assert.Equal(courier.MsgFailed, mb.WrittenMsgStatuses()[0].Status())
+	assert.Equal(msg.ID(), mb.WrittenMsgStatuses()[0].MsgID())
+	assert.Equal(courier.MsgStatusFailed, mb.WrittenMsgStatuses()[0].Status())
 	assert.Equal(1, len(mb.WrittenChannelLogs()))
 
 	mb.Reset()
 
 	// change our channel to our dummy channel
-	msg = test.NewMockMsg(courier.MsgID(102), courier.NilMsgUUID, mockChannel, "tel:+250788383383", "test message 2")
+	msg = test.NewMockMsg(courier.MsgID(102), courier.NilMsgUUID, mockChannel, "tel:+250788383383", "test message 2", nil)
 
 	// send it
 	mb.PushOutgoingMsg(msg)
@@ -68,8 +68,8 @@ func TestHandling(t *testing.T) {
 	// message should be marked as wired
 	assert.Len(mb.WrittenMsgStatuses(), 1)
 	status := mb.WrittenMsgStatuses()[0]
-	assert.Equal(msg.ID(), status.ID())
-	assert.Equal(courier.MsgSent, status.Status())
+	assert.Equal(msg.ID(), status.MsgID())
+	assert.Equal(courier.MsgStatusSent, status.Status())
 
 	assert.Len(mb.WrittenChannelLogs(), 1)
 	clog := mb.WrittenChannelLogs()[0]
@@ -89,8 +89,8 @@ func TestHandling(t *testing.T) {
 
 	// message should be marked as wired
 	assert.Equal(1, len(mb.WrittenMsgStatuses()))
-	assert.Equal(msg.ID(), mb.WrittenMsgStatuses()[0].ID())
-	assert.Equal(courier.MsgWired, mb.WrittenMsgStatuses()[0].Status())
+	assert.Equal(msg.ID(), mb.WrittenMsgStatuses()[0].MsgID())
+	assert.Equal(courier.MsgStatusWired, mb.WrittenMsgStatuses()[0].Status())
 
 	// try to receive a message instead
 	resp, err := http.Get("http://localhost:8080/c/mck/e4bb1578-29da-4fa5-a214-9da19dd24230/receive")

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"path"
+	"reflect"
 	"unicode/utf8"
 
 	validator "gopkg.in/go-playground/validator.v9"
@@ -132,4 +133,26 @@ func ChunkSlice[T any](slice []T, size int) [][]T {
 		chunks = append(chunks, slice[i:end])
 	}
 	return chunks
+}
+
+// MapContains returns whether m1 contains all the key value pairs in m2
+func MapContains[K comparable, V comparable, M ~map[K]V](m1 M, m2 M) bool {
+	for k, v2 := range m2 {
+		v1, ok := m1[k]
+		if !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
+}
+
+// MapUpdate updates map m1 to contain the key value pairs in m2 - deleting any pairs in m1 which have zero values in m2.
+func MapUpdate[K comparable, V comparable, M ~map[K]V](m1 M, m2 M) {
+	for k, v := range m2 {
+		if reflect.ValueOf(v).IsZero() {
+			delete(m1, k)
+		} else {
+			m1[k] = v
+		}
+	}
 }

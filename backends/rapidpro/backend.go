@@ -3,9 +3,12 @@ package rapidpro
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -22,6 +25,7 @@ import (
 	"github.com/nyaruka/courier/queue"
 	"github.com/nyaruka/gocommon/analytics"
 	"github.com/nyaruka/gocommon/dbutil"
+	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/storage"
 	"github.com/nyaruka/gocommon/syncx"
@@ -29,7 +33,6 @@ import (
 	"github.com/nyaruka/gocommon/uuids"
 	"github.com/nyaruka/redisx"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // the name for our message queue
@@ -48,6 +51,273 @@ var uuidRegex = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 func init() {
 	courier.RegisterBackend("rapidpro", newBackend)
+}
+
+type backend struct {
+	config *courier.Config
+
+	statusWriter *StatusWriter
+	dbLogWriter  *DBLogWriter      // unattached logs being written to the database
+	stLogWriter  *StorageLogWriter // attached logs being written to storage
+	writerWG     *sync.WaitGroup
+
+	db                *sqlx.DB
+	redisPool         *redis.Pool
+	attachmentStorage storage.Storage
+	logStorage        storage.Storage
+
+	stopChan  chan bool
+	waitGroup *sync.WaitGroup
+
+	httpClient         *http.Client
+	httpClientInsecure *http.Client
+	httpAccess         *httpx.AccessConfig
+
+	mediaCache   *redisx.IntervalHash
+	mediaMutexes syncx.HashMutex
+
+	// tracking of recent messages received to avoid creating duplicates
+	receivedExternalIDs *redisx.IntervalHash // using external id
+	receivedMsgs        *redisx.IntervalHash // using content hash
+
+	// tracking of external ids of messages we've sent in case we need one before its status update has been written
+	sentExternalIDs *redisx.IntervalHash
+
+	// both sqlx and redis provide wait stats which are cummulative that we need to convert into increments
+	dbWaitDuration    time.Duration
+	dbWaitCount       int64
+	redisWaitDuration time.Duration
+	redisWaitCount    int64
+}
+
+// NewBackend creates a new RapidPro backend
+func newBackend(cfg *courier.Config) courier.Backend {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 64
+	transport.MaxIdleConnsPerHost = 8
+	transport.IdleConnTimeout = 15 * time.Second
+
+	insecureTransport := http.DefaultTransport.(*http.Transport).Clone()
+	insecureTransport.MaxIdleConns = 64
+	insecureTransport.MaxIdleConnsPerHost = 8
+	insecureTransport.IdleConnTimeout = 15 * time.Second
+	insecureTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	disallowedIPs, disallowedNets, _ := cfg.ParseDisallowedNetworks()
+
+	return &backend{
+		config: cfg,
+
+		httpClient:         &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		httpClientInsecure: &http.Client{Transport: insecureTransport, Timeout: 30 * time.Second},
+		httpAccess:         httpx.NewAccessConfig(10*time.Second, disallowedIPs, disallowedNets),
+
+		stopChan:  make(chan bool),
+		waitGroup: &sync.WaitGroup{},
+
+		writerWG: &sync.WaitGroup{},
+
+		mediaCache:   redisx.NewIntervalHash("media-lookups", time.Hour*24, 2),
+		mediaMutexes: *syncx.NewHashMutex(8),
+
+		receivedMsgs:        redisx.NewIntervalHash("seen-msgs", time.Second*2, 2),        // 2 - 4 seconds
+		receivedExternalIDs: redisx.NewIntervalHash("seen-external-ids", time.Hour*24, 2), // 24 - 48 hours
+		sentExternalIDs:     redisx.NewIntervalHash("sent-external-ids", time.Hour, 2),    // 1 - 2 hours
+	}
+}
+
+// Start starts our RapidPro backend, this tests our various connections and starts our spool flushers
+func (b *backend) Start() error {
+	// parse and test our redis config
+	log := slog.With(
+		"comp", "backend",
+		"state", "starting",
+	)
+	log.Info("starting backend")
+
+	// parse and test our db config
+	dbURL, err := url.Parse(b.config.DB)
+	if err != nil {
+		return fmt.Errorf("unable to parse DB URL '%s': %s", b.config.DB, err)
+	}
+
+	if dbURL.Scheme != "postgres" {
+		return fmt.Errorf("invalid DB URL: '%s', only postgres is supported", b.config.DB)
+	}
+
+	// build our db
+	db, err := sqlx.Open("postgres", b.config.DB)
+	if err != nil {
+		return fmt.Errorf("unable to open DB with config: '%s': %s", b.config.DB, err)
+	}
+
+	// configure our pool
+	b.db = db
+	b.db.SetMaxIdleConns(4)
+	b.db.SetMaxOpenConns(16)
+
+	// try connecting
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err = b.db.PingContext(ctx)
+	cancel()
+	if err != nil {
+		log.Error("db not reachable", "error", err)
+	} else {
+		log.Info("db ok")
+	}
+
+	// parse and test our redis config
+	redisURL, err := url.Parse(b.config.Redis)
+	if err != nil {
+		return fmt.Errorf("unable to parse Redis URL '%s': %s", b.config.Redis, err)
+	}
+
+	// create our pool
+	redisPool := &redis.Pool{
+		Wait:        true,              // makes callers wait for a connection
+		MaxActive:   36,                // only open this many concurrent connections at once
+		MaxIdle:     4,                 // only keep up to this many idle
+		IdleTimeout: 240 * time.Second, // how long to wait before reaping a connection
+		Dial: func() (redis.Conn, error) {
+			conn, err := redis.Dial("tcp", redisURL.Host)
+			if err != nil {
+				return nil, err
+			}
+
+			// send auth if required
+			if redisURL.User != nil {
+				pass, authRequired := redisURL.User.Password()
+				if authRequired {
+					if _, err := conn.Do("AUTH", pass); err != nil {
+						conn.Close()
+						return nil, err
+					}
+				}
+			}
+
+			// switch to the right DB
+			_, err = conn.Do("SELECT", strings.TrimLeft(redisURL.Path, "/"))
+			return conn, err
+		},
+	}
+	b.redisPool = redisPool
+
+	// test our redis connection
+	conn := redisPool.Get()
+	defer conn.Close()
+	_, err = conn.Do("PING")
+	if err != nil {
+		log.Error("redis not reachable", "error", err)
+	} else {
+		log.Info("redis ok")
+	}
+
+	// start our dethrottler if we are going to be doing some sending
+	if b.config.MaxWorkers > 0 {
+		queue.StartDethrottler(redisPool, b.stopChan, b.waitGroup, msgQueueName)
+	}
+
+	// create our storage (S3 or file system)
+	if b.config.AWSAccessKeyID != "" || b.config.AWSUseCredChain {
+		s3config := &storage.S3Options{
+			AWSAccessKeyID:     b.config.AWSAccessKeyID,
+			AWSSecretAccessKey: b.config.AWSSecretAccessKey,
+			Endpoint:           b.config.S3Endpoint,
+			Region:             b.config.S3Region,
+			DisableSSL:         b.config.S3DisableSSL,
+			ForcePathStyle:     b.config.S3ForcePathStyle,
+			MaxRetries:         3,
+		}
+		if b.config.AWSAccessKeyID != "" && !b.config.AWSUseCredChain {
+			s3config.AWSAccessKeyID = b.config.AWSAccessKeyID
+			s3config.AWSSecretAccessKey = b.config.AWSSecretAccessKey
+		}
+		s3Client, err := storage.NewS3Client(s3config)
+		if err != nil {
+			return err
+		}
+		b.attachmentStorage = storage.NewS3(s3Client, b.config.S3AttachmentsBucket, b.config.S3Region, s3.BucketCannedACLPublicRead, 32)
+		b.logStorage = storage.NewS3(s3Client, b.config.S3LogsBucket, b.config.S3Region, s3.BucketCannedACLPrivate, 32)
+	} else {
+		b.attachmentStorage = storage.NewFS(storageDir+"/attachments", 0766)
+		b.logStorage = storage.NewFS(storageDir+"/logs", 0766)
+	}
+
+	// check our storages
+	if err := checkStorage(b.attachmentStorage); err != nil {
+		log.Error(b.attachmentStorage.Name()+" attachment storage not available", "error", err)
+	} else {
+		log.Info(b.attachmentStorage.Name() + " attachment storage ok")
+	}
+	if err := checkStorage(b.logStorage); err != nil {
+		log.Error(b.logStorage.Name()+" log storage not available", "error", err)
+	} else {
+		log.Info(b.logStorage.Name() + " log storage ok")
+	}
+
+	// make sure our spool dirs are writable
+	err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "msgs")
+	if err == nil {
+		err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "statuses")
+	}
+	if err == nil {
+		err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "events")
+	}
+	if err != nil {
+		log.Error("spool directories not writable", "error", err)
+	} else {
+		log.Info("spool directories ok")
+	}
+
+	// create our batched writers and start them
+	b.statusWriter = NewStatusWriter(b, b.config.SpoolDir, b.writerWG)
+	b.statusWriter.Start()
+
+	b.dbLogWriter = NewDBLogWriter(b.db, b.writerWG)
+	b.dbLogWriter.Start()
+
+	b.stLogWriter = NewStorageLogWriter(b.logStorage, b.writerWG)
+	b.stLogWriter.Start()
+
+	// register and start our spool flushers
+	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "msgs"), b.flushMsgFile)
+	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "statuses"), b.flushStatusFile)
+	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "events"), b.flushChannelEventFile)
+
+	slog.Info("backend started", "comp", "backend", "state", "started")
+	return nil
+}
+
+// Stop stops our RapidPro backend, closing our db and redis connections
+func (b *backend) Stop() error {
+	// close our stop channel
+	close(b.stopChan)
+
+	// wait for our threads to exit
+	b.waitGroup.Wait()
+	return nil
+}
+
+func (b *backend) Cleanup() error {
+	// stop our batched writers
+	if b.statusWriter != nil {
+		b.statusWriter.Stop()
+	}
+	if b.dbLogWriter != nil {
+		b.dbLogWriter.Stop()
+	}
+	if b.stLogWriter != nil {
+		b.stLogWriter.Stop()
+	}
+
+	// wait for them to flush fully
+	b.writerWG.Wait()
+
+	// close our db and redis pool
+	if b.db != nil {
+		b.db.Close()
+	}
+	return b.redisPool.Close()
 }
 
 // GetChannel returns the channel for the passed in type and UUID
@@ -75,20 +345,20 @@ func (b *backend) GetChannelByAddress(ctx context.Context, ct courier.ChannelTyp
 }
 
 // GetContact returns the contact for the passed in channel and URN
-func (b *backend) GetContact(ctx context.Context, c courier.Channel, urn urns.URN, auth string, name string, clog *courier.ChannelLog) (courier.Contact, error) {
-	dbChannel := c.(*DBChannel)
-	return contactForURN(ctx, b, dbChannel.OrgID_, dbChannel, urn, auth, name, clog)
+func (b *backend) GetContact(ctx context.Context, c courier.Channel, urn urns.URN, authTokens map[string]string, name string, clog *courier.ChannelLog) (courier.Contact, error) {
+	dbChannel := c.(*Channel)
+	return contactForURN(ctx, b, dbChannel.OrgID_, dbChannel, urn, authTokens, name, clog)
 }
 
 // AddURNtoContact adds a URN to the passed in contact
-func (b *backend) AddURNtoContact(ctx context.Context, c courier.Channel, contact courier.Contact, urn urns.URN) (urns.URN, error) {
+func (b *backend) AddURNtoContact(ctx context.Context, c courier.Channel, contact courier.Contact, urn urns.URN, authTokens map[string]string) (urns.URN, error) {
 	tx, err := b.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return urns.NilURN, err
 	}
-	dbChannel := c.(*DBChannel)
-	dbContact := contact.(*DBContact)
-	_, err = contactURNForURN(tx, dbChannel, dbContact.ID_, urn, "")
+	dbChannel := c.(*Channel)
+	dbContact := contact.(*Contact)
+	_, err = getOrCreateContactURN(tx, dbChannel, dbContact.ID_, urn, authTokens)
 	if err != nil {
 		return urns.NilURN, err
 	}
@@ -100,50 +370,41 @@ func (b *backend) AddURNtoContact(ctx context.Context, c courier.Channel, contac
 	return urn, nil
 }
 
-const removeURNFromContact = `
-UPDATE
-	contacts_contacturn
-SET
-	contact_id = NULL
-WHERE
-	contact_id = $1 AND
-	identity = $2
-`
-
 // RemoveURNFromcontact removes a URN from the passed in contact
 func (b *backend) RemoveURNfromContact(ctx context.Context, c courier.Channel, contact courier.Contact, urn urns.URN) (urns.URN, error) {
-	dbContact := contact.(*DBContact)
-	_, err := b.db.ExecContext(ctx, removeURNFromContact, dbContact.ID_, urn.Identity().String())
+	dbContact := contact.(*Contact)
+	_, err := b.db.ExecContext(ctx, `UPDATE contacts_contacturn SET contact_id = NULL WHERE contact_id = $1 AND identity = $2`, dbContact.ID_, urn.Identity().String())
 	if err != nil {
 		return urns.NilURN, err
 	}
 	return urn, nil
 }
 
-const updateMsgVisibilityDeletedBySender = `
-UPDATE
-	msgs_msg
-SET
-	visibility = 'X',
-	text = '',
-	attachments = '{}'
-WHERE
-	msgs_msg.id = (SELECT m."id" FROM "msgs_msg" m INNER JOIN "channels_channel" c ON (m."channel_id" = c."id") WHERE (c."uuid" = $1 AND m."external_id" = $2 AND m."direction" = 'I'))
-RETURNING
-	msgs_msg.id
-`
+// DeleteMsgByExternalID resolves a message external id and quees a task to mailroom to delete it
+func (b *backend) DeleteMsgByExternalID(ctx context.Context, channel courier.Channel, externalID string) error {
+	ch := channel.(*Channel)
+	row := b.db.QueryRowContext(ctx, `SELECT id, contact_id FROM msgs_msg WHERE channel_id = $1 AND external_id = $2 AND direction = 'I'`, ch.ID(), externalID)
 
-// DeleteMsgWithExternalID delete a message we receive an event that it should be deleted
-func (b *backend) DeleteMsgWithExternalID(ctx context.Context, channel courier.Channel, externalID string) error {
-	_, err := b.db.ExecContext(ctx, updateMsgVisibilityDeletedBySender, string(channel.UUID()), externalID)
-	if err != nil {
-		return err
+	var msgID courier.MsgID
+	var contactID ContactID
+	if err := row.Scan(&msgID, &contactID); err != nil && err != sql.ErrNoRows {
+		return errors.Wrap(err, "error querying deleted msg")
 	}
+
+	if msgID != courier.NilMsgID && contactID != NilContactID {
+		rc := b.redisPool.Get()
+		defer rc.Close()
+
+		if err := queueMsgDeleted(rc, ch, msgID, contactID); err != nil {
+			return errors.Wrap(err, "error queuing message deleted task")
+		}
+	}
+
 	return nil
 }
 
 // NewIncomingMsg creates a new message from the given params
-func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text string, extID string, clog *courier.ChannelLog) courier.Msg {
+func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text string, extID string, clog *courier.ChannelLog) courier.MsgIn {
 	// strip out invalid UTF8 and NULL chars
 	urn = urns.URN(dbutil.ToValidUTF8(string(urn)))
 	text = dbutil.ToValidUTF8(text)
@@ -153,7 +414,7 @@ func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text str
 	msg.WithReceivedOn(time.Now().UTC())
 
 	// check if this message could be a duplicate and if so use the original's UUID
-	if prevUUID := b.checkMsgSeen(msg); prevUUID != courier.NilMsgUUID {
+	if prevUUID := b.checkMsgAlreadyReceived(msg); prevUUID != courier.NilMsgUUID {
 		msg.UUID_ = prevUUID
 		msg.alreadyWritten = true
 	}
@@ -162,7 +423,7 @@ func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text str
 }
 
 // PopNextOutgoingMsg pops the next message that needs to be sent
-func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.Msg, error) {
+func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.MsgOut, error) {
 	// pop the next message off our queue
 	rc := b.redisPool.Get()
 	defer rc.Close()
@@ -180,7 +441,7 @@ func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.Msg, error) {
 	}
 
 	if msgJSON != "" {
-		dbMsg := &DBMsg{}
+		dbMsg := &Msg{}
 		err = json.Unmarshal([]byte(msgJSON), dbMsg)
 		if err != nil {
 			queue.MarkComplete(rc, msgQueueName, token)
@@ -195,7 +456,7 @@ func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.Msg, error) {
 		}
 
 		dbMsg.Direction_ = MsgOutgoing
-		dbMsg.channel = channel.(*DBChannel)
+		dbMsg.channel = channel.(*Channel)
 		dbMsg.workerToken = token
 
 		// clear out our seen incoming messages
@@ -244,36 +505,36 @@ func (b *backend) ClearMsgSent(ctx context.Context, id courier.MsgID) error {
 }
 
 // MarkOutgoingMsgComplete marks the passed in message as having completed processing, freeing up a worker for that channel
-func (b *backend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.Msg, status courier.MsgStatus) {
+func (b *backend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.MsgOut, status courier.StatusUpdate) {
 	rc := b.redisPool.Get()
 	defer rc.Close()
 
-	dbMsg := msg.(*DBMsg)
+	dbMsg := msg.(*Msg)
 
 	queue.MarkComplete(rc, msgQueueName, dbMsg.workerToken)
 
 	// mark as sent in redis as well if this was actually wired or sent
-	if status != nil && (status.Status() == courier.MsgSent || status.Status() == courier.MsgWired) {
+	if status != nil && (status.Status() == courier.MsgStatusSent || status.Status() == courier.MsgStatusWired) {
 		dateKey := fmt.Sprintf(sentSetName, time.Now().UTC().Format("2006_01_02"))
 		rc.Send("sadd", dateKey, msg.ID().String())
 		rc.Send("expire", dateKey, 60*60*24*2)
 		_, err := rc.Do("")
 		if err != nil {
-			logrus.WithError(err).WithField("sent_msgs_key", dateKey).Error("unable to add new unsent message")
+			slog.Error("unable to add new unsent message", "error", err, "sent_msgs_key", dateKey)
 		}
 
 		// if our msg has an associated session and timeout, update that
 		if dbMsg.SessionWaitStartedOn_ != nil {
 			err = updateSessionTimeout(ctx, b, dbMsg.SessionID_, *dbMsg.SessionWaitStartedOn_, dbMsg.SessionTimeout_)
 			if err != nil {
-				logrus.WithError(err).WithField("session_id", dbMsg.SessionID_).Error("unable to update session timeout")
+				slog.Error("unable to update session timeout", "error", err, "session_id", dbMsg.SessionID_)
 			}
 		}
 	}
 }
 
 // WriteMsg writes the passed in message to our store
-func (b *backend) WriteMsg(ctx context.Context, m courier.Msg, clog *courier.ChannelLog) error {
+func (b *backend) WriteMsg(ctx context.Context, m courier.MsgIn, clog *courier.ChannelLog) error {
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
@@ -281,69 +542,82 @@ func (b *backend) WriteMsg(ctx context.Context, m courier.Msg, clog *courier.Cha
 }
 
 // NewStatusUpdateForID creates a new Status object for the given message id
-func (b *backend) NewMsgStatusForID(channel courier.Channel, id courier.MsgID, status courier.MsgStatusValue, clog *courier.ChannelLog) courier.MsgStatus {
-	return newMsgStatus(channel, id, "", status, clog)
+func (b *backend) NewStatusUpdate(channel courier.Channel, id courier.MsgID, status courier.MsgStatus, clog *courier.ChannelLog) courier.StatusUpdate {
+	return newStatusUpdate(channel, id, "", status, clog)
 }
 
 // NewStatusUpdateForID creates a new Status object for the given message id
-func (b *backend) NewMsgStatusForExternalID(channel courier.Channel, externalID string, status courier.MsgStatusValue, clog *courier.ChannelLog) courier.MsgStatus {
-	return newMsgStatus(channel, courier.NilMsgID, externalID, status, clog)
+func (b *backend) NewStatusUpdateByExternalID(channel courier.Channel, externalID string, status courier.MsgStatus, clog *courier.ChannelLog) courier.StatusUpdate {
+	return newStatusUpdate(channel, courier.NilMsgID, externalID, status, clog)
 }
 
-// WriteMsgStatus writes the passed in MsgStatus to our store
-func (b *backend) WriteMsgStatus(ctx context.Context, status courier.MsgStatus) error {
-	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
-	defer cancel()
+// WriteStatusUpdate writes the passed in MsgStatus to our store
+func (b *backend) WriteStatusUpdate(ctx context.Context, status courier.StatusUpdate) error {
+	log := slog.With("msg_id", status.MsgID(), "msg_external_id", status.ExternalID(), "status", status.Status())
+	su := status.(*StatusUpdate)
 
-	if status.HasUpdatedURN() {
+	if status.MsgID() == courier.NilMsgID && status.ExternalID() == "" {
+		return errors.New("message status with no id or external id")
+	}
+
+	// if we have a URN update, do that
+	oldURN, newURN := status.URNUpdate()
+	if oldURN != urns.NilURN && newURN != urns.NilURN {
 		err := b.updateContactURN(ctx, status)
 		if err != nil {
 			return errors.Wrap(err, "error updating contact URN")
 		}
 	}
-	// if we have an ID, we can have our batch commit for us
-	if status.ID() != courier.NilMsgID {
-		b.statusWriter.Queue(status.(*DBMsgStatus))
-	} else {
-		// otherwise, write normally (synchronously)
-		err := writeMsgStatus(timeout, b, status)
-		if err != nil {
-			return err
+
+	if status.MsgID() != courier.NilMsgID {
+		// this is a message we've just sent and were given an external id for
+		if status.ExternalID() != "" {
+			rc := b.redisPool.Get()
+			defer rc.Close()
+
+			err := b.sentExternalIDs.Set(rc, fmt.Sprintf("%d|%s", su.ChannelID_, su.ExternalID_), fmt.Sprintf("%d", status.MsgID()))
+			if err != nil {
+				log.Error("error recording external id", "error", err)
+			}
+		}
+
+		// we sent a message that errored so clear our sent flag to allow it to be retried
+		if status.Status() == courier.MsgStatusErrored {
+			err := b.ClearMsgSent(ctx, status.MsgID())
+			if err != nil {
+				log.Error("error clearing sent flags", "error", err)
+			}
 		}
 	}
 
-	// if we have an id and are marking an outgoing msg as errored, then clear our sent flag
-	if status.ID() != courier.NilMsgID && status.Status() == courier.MsgErrored {
-		err := b.ClearMsgSent(ctx, status.ID())
-		if err != nil {
-			logrus.WithError(err).WithField("msg", status.ID()).Error("error clearing sent flags")
-		}
-	}
+	// queue the status to written by the batch writer
+	b.statusWriter.Queue(status.(*StatusUpdate))
+	log.Debug("status update queued")
 
 	return nil
 }
 
 // updateContactURN updates contact URN according to the old/new URNs from status
-func (b *backend) updateContactURN(ctx context.Context, status courier.MsgStatus) error {
-	old, new := status.UpdatedURN()
+func (b *backend) updateContactURN(ctx context.Context, status courier.StatusUpdate) error {
+	old, new := status.URNUpdate()
 
 	// retrieve channel
 	channel, err := b.GetChannel(ctx, courier.AnyChannelType, status.ChannelUUID())
 	if err != nil {
 		return errors.Wrap(err, "error retrieving channel")
 	}
-	dbChannel := channel.(*DBChannel)
+	dbChannel := channel.(*Channel)
 	tx, err := b.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	// retrieve the old URN
-	oldContactURN, err := selectContactURN(tx, dbChannel.OrgID(), old)
+	oldContactURN, err := getContactURNByIdentity(tx, dbChannel.OrgID(), old)
 	if err != nil {
 		return errors.Wrap(err, "error retrieving old contact URN")
 	}
 	// retrieve the new URN
-	newContactURN, err := selectContactURN(tx, dbChannel.OrgID(), new)
+	newContactURN, err := getContactURNByIdentity(tx, dbChannel.OrgID(), new)
 	if err != nil {
 		// only update the old URN path if the new URN doesn't exist
 		if err == sql.ErrNoRows {
@@ -412,7 +686,7 @@ func (b *backend) SaveAttachment(ctx context.Context, ch courier.Channel, conten
 		filename = fmt.Sprintf("%s.%s", filename, extension)
 	}
 
-	orgID := ch.(*DBChannel).OrgID()
+	orgID := ch.(*Channel).OrgID()
 
 	path := filepath.Join(b.config.S3AttachmentsPrefix, strconv.FormatInt(int64(orgID), 10), filename[:4], filename[4:8], filename)
 
@@ -444,7 +718,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	rc := b.redisPool.Get()
 	defer rc.Close()
 
-	var media *DBMedia
+	var media *Media
 	mediaJSON, err := b.mediaCache.Get(rc, mediaUUID)
 	if err != nil {
 		return nil, errors.Wrap(err, "error looking up cached media")
@@ -468,6 +742,17 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	}
 
 	return media, nil
+}
+
+func (b *backend) HttpClient(secure bool) *http.Client {
+	if secure {
+		return b.httpClient
+	}
+	return b.httpClientInsecure
+}
+
+func (b *backend) HttpAccess() *httpx.AccessConfig {
+	return b.httpAccess
 }
 
 // Health returns the health of this backend as a string, returning "" if all is well
@@ -549,16 +834,14 @@ func (b *backend) Heartbeat() error {
 	analytics.Gauge("courier.bulk_queue", float64(bulkSize))
 	analytics.Gauge("courier.priority_queue", float64(prioritySize))
 
-	logrus.WithFields(logrus.Fields{
-		"db_busy":          dbStats.InUse,
-		"db_idle":          dbStats.Idle,
-		"db_wait_time":     dbWaitDurationInPeriod,
-		"db_wait_count":    dbWaitCountInPeriod,
-		"redis_wait_time":  dbWaitDurationInPeriod,
-		"redis_wait_count": dbWaitCountInPeriod,
-		"priority_size":    prioritySize,
-		"bulk_size":        bulkSize,
-	}).Info("current analytics")
+	slog.Info("current analytics", "db_busy", dbStats.InUse,
+		"db_idle", dbStats.Idle,
+		"db_wait_time", dbWaitDurationInPeriod,
+		"db_wait_count", dbWaitCountInPeriod,
+		"redis_wait_time", dbWaitDurationInPeriod,
+		"redis_wait_count", dbWaitCountInPeriod,
+		"priority_size", prioritySize,
+		"bulk_size", bulkSize)
 
 	return nil
 }
@@ -611,7 +894,7 @@ func (b *backend) Status() string {
 		channel, err := getChannel(context.Background(), b.db, courier.AnyChannelType, channelUUID)
 		channelType := "!!"
 		if err == nil {
-			channelType = channel.ChannelType().String()
+			channelType = string(channel.ChannelType())
 		}
 
 		// get # of items in our normal queue
@@ -632,250 +915,9 @@ func (b *backend) Status() string {
 	return status.String()
 }
 
-// Start starts our RapidPro backend, this tests our various connections and starts our spool flushers
-func (b *backend) Start() error {
-	// parse and test our redis config
-	log := logrus.WithFields(logrus.Fields{
-		"comp":  "backend",
-		"state": "starting",
-	})
-	log.Info("starting backend")
-
-	// parse and test our db config
-	dbURL, err := url.Parse(b.config.DB)
-	if err != nil {
-		return fmt.Errorf("unable to parse DB URL '%s': %s", b.config.DB, err)
-	}
-
-	if dbURL.Scheme != "postgres" {
-		return fmt.Errorf("invalid DB URL: '%s', only postgres is supported", b.config.DB)
-	}
-
-	// build our db
-	db, err := sqlx.Open("postgres", b.config.DB)
-	if err != nil {
-		return fmt.Errorf("unable to open DB with config: '%s': %s", b.config.DB, err)
-	}
-
-	// configure our pool
-	b.db = db
-	b.db.SetMaxIdleConns(4)
-	b.db.SetMaxOpenConns(16)
-
-	// try connecting
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	err = b.db.PingContext(ctx)
-	cancel()
-	if err != nil {
-		log.WithError(err).Error("db not reachable")
-	} else {
-		log.Info("db ok")
-	}
-
-	// parse and test our redis config
-	redisURL, err := url.Parse(b.config.Redis)
-	if err != nil {
-		return fmt.Errorf("unable to parse Redis URL '%s': %s", b.config.Redis, err)
-	}
-
-	// create our pool
-	redisPool := &redis.Pool{
-		Wait:        true,              // makes callers wait for a connection
-		MaxActive:   36,                // only open this many concurrent connections at once
-		MaxIdle:     4,                 // only keep up to this many idle
-		IdleTimeout: 240 * time.Second, // how long to wait before reaping a connection
-		Dial: func() (redis.Conn, error) {
-			conn, err := redis.Dial("tcp", redisURL.Host)
-			if err != nil {
-				return nil, err
-			}
-
-			// send auth if required
-			if redisURL.User != nil {
-				pass, authRequired := redisURL.User.Password()
-				if authRequired {
-					if _, err := conn.Do("AUTH", pass); err != nil {
-						conn.Close()
-						return nil, err
-					}
-				}
-			}
-
-			// switch to the right DB
-			_, err = conn.Do("SELECT", strings.TrimLeft(redisURL.Path, "/"))
-			return conn, err
-		},
-	}
-	b.redisPool = redisPool
-
-	// test our redis connection
-	conn := redisPool.Get()
-	defer conn.Close()
-	_, err = conn.Do("PING")
-	if err != nil {
-		log.WithError(err).Error("redis not reachable")
-	} else {
-		log.Info("redis ok")
-	}
-
-	// start our dethrottler if we are going to be doing some sending
-	if b.config.MaxWorkers > 0 {
-		queue.StartDethrottler(redisPool, b.stopChan, b.waitGroup, msgQueueName)
-	}
-
-	// create our storage (S3 or file system)
-	if b.config.AWSAccessKeyID != "" || b.config.AWSUseCredChain {
-		s3config := &storage.S3Options{
-			AWSAccessKeyID:     b.config.AWSAccessKeyID,
-			AWSSecretAccessKey: b.config.AWSSecretAccessKey,
-			Endpoint:           b.config.S3Endpoint,
-			Region:             b.config.S3Region,
-			DisableSSL:         b.config.S3DisableSSL,
-			ForcePathStyle:     b.config.S3ForcePathStyle,
-			MaxRetries:         3,
-		}
-		if b.config.AWSAccessKeyID != "" && !b.config.AWSUseCredChain {
-			s3config.AWSAccessKeyID = b.config.AWSAccessKeyID
-			s3config.AWSSecretAccessKey = b.config.AWSSecretAccessKey
-		}
-		s3Client, err := storage.NewS3Client(s3config)
-		if err != nil {
-			return err
-		}
-		b.attachmentStorage = storage.NewS3(s3Client, b.config.S3AttachmentsBucket, b.config.S3Region, s3.BucketCannedACLPublicRead, 32)
-		b.logStorage = storage.NewS3(s3Client, b.config.S3LogsBucket, b.config.S3Region, s3.BucketCannedACLPrivate, 32)
-	} else {
-		b.attachmentStorage = storage.NewFS(storageDir+"/attachments", 0766)
-		b.logStorage = storage.NewFS(storageDir+"/logs", 0766)
-	}
-
-	// check our storages
-	if err := checkStorage(b.attachmentStorage); err != nil {
-		log.WithError(err).Error(b.attachmentStorage.Name() + " attachment storage not available")
-	} else {
-		log.Info(b.attachmentStorage.Name() + " attachment storage ok")
-	}
-	if err := checkStorage(b.logStorage); err != nil {
-		log.WithError(err).Error(b.logStorage.Name() + " log storage not available")
-	} else {
-		log.Info(b.logStorage.Name() + " log storage ok")
-	}
-
-	// make sure our spool dirs are writable
-	err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "msgs")
-	if err == nil {
-		err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "statuses")
-	}
-	if err == nil {
-		err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "events")
-	}
-	if err != nil {
-		log.WithError(err).Error("spool directories not writable")
-	} else {
-		log.Info("spool directories ok")
-	}
-
-	// create our batched writers and start them
-	b.statusWriter = NewStatusWriter(b.db, b.config.SpoolDir, b.writerWG)
-	b.statusWriter.Start()
-
-	b.dbLogWriter = NewDBLogWriter(b.db, b.writerWG)
-	b.dbLogWriter.Start()
-
-	b.stLogWriter = NewStorageLogWriter(b.logStorage, b.writerWG)
-	b.stLogWriter.Start()
-
-	// register and start our spool flushers
-	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "msgs"), b.flushMsgFile)
-	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "statuses"), b.flushStatusFile)
-	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "events"), b.flushChannelEventFile)
-
-	logrus.WithFields(logrus.Fields{"comp": "backend", "state": "started"}).Info("backend started")
-	return nil
-}
-
-// Stop stops our RapidPro backend, closing our db and redis connections
-func (b *backend) Stop() error {
-	// close our stop channel
-	close(b.stopChan)
-
-	// wait for our threads to exit
-	b.waitGroup.Wait()
-	return nil
-}
-
-func (b *backend) Cleanup() error {
-	// stop our batched writers
-	if b.statusWriter != nil {
-		b.statusWriter.Stop()
-	}
-	if b.dbLogWriter != nil {
-		b.dbLogWriter.Stop()
-	}
-	if b.stLogWriter != nil {
-		b.stLogWriter.Stop()
-	}
-
-	// wait for them to flush fully
-	b.writerWG.Wait()
-
-	// close our db and redis pool
-	if b.db != nil {
-		b.db.Close()
-	}
-	return b.redisPool.Close()
-}
-
 // RedisPool returns the redisPool for this backend
 func (b *backend) RedisPool() *redis.Pool {
 	return b.redisPool
-}
-
-// NewBackend creates a new RapidPro backend
-func newBackend(cfg *courier.Config) courier.Backend {
-	return &backend{
-		config: cfg,
-
-		stopChan:  make(chan bool),
-		waitGroup: &sync.WaitGroup{},
-
-		writerWG: &sync.WaitGroup{},
-
-		mediaCache:   redisx.NewIntervalHash("media-lookups", time.Hour*24, 2),
-		mediaMutexes: *syncx.NewHashMutex(8),
-
-		seenMsgs:        redisx.NewIntervalHash("seen-msgs", time.Second*2, 2),
-		seenExternalIDs: redisx.NewIntervalHash("seen-external-ids", time.Hour*24, 2),
-	}
-}
-
-type backend struct {
-	config *courier.Config
-
-	statusWriter *StatusWriter
-	dbLogWriter  *DBLogWriter      // unattached logs being written to the database
-	stLogWriter  *StorageLogWriter // attached logs being written to storage
-	writerWG     *sync.WaitGroup
-
-	db                *sqlx.DB
-	redisPool         *redis.Pool
-	attachmentStorage storage.Storage
-	logStorage        storage.Storage
-
-	stopChan  chan bool
-	waitGroup *sync.WaitGroup
-
-	mediaCache   *redisx.IntervalHash
-	mediaMutexes syncx.HashMutex
-
-	seenMsgs        *redisx.IntervalHash
-	seenExternalIDs *redisx.IntervalHash
-
-	// both sqlx and redis provide wait stats which are cummulative that we need to convert into increments
-	dbWaitDuration    time.Duration
-	dbWaitCount       int64
-	redisWaitDuration time.Duration
-	redisWaitCount    int64
 }
 
 func checkStorage(s storage.Storage) error {

@@ -1,3 +1,171 @@
+v9.0.1 (2024-01-08)
+-------------------------
+ * Fix sending bandwidth MMS without text
+
+v9.0.0 (2024-01-05)
+-------------------------
+ * Bump golang.org/x/crypto from 0.16.0 to 0.17.0
+
+v8.3.32 (2023-12-12)
+-------------------------
+ * Update deps
+
+v8.3.31 (2023-12-06)
+-------------------------
+ * Use language value in templating metadata instead of trying to match
+
+v8.3.30 (2023-12-04)
+-------------------------
+ * Change channel events so that created_on is db time and is included in queued task payload
+
+v8.3.29 (2023-12-04)
+-------------------------
+ * Fix FBA timestamps that sometimes are in seconds instead of milliseconds
+ * Remove support for HSM template support
+ * Update to latest gocommon and phonenumbers
+
+v8.3.28 (2023-11-23)
+-------------------------
+ * Logging tweak
+
+v8.3.27 (2023-10-31)
+-------------------------
+ * Prevent all courier HTTP requests from accessing local networks
+
+v8.3.26 (2023-10-30)
+-------------------------
+ * Update to latest gocommon
+
+v8.3.25 (2023-10-25)
+-------------------------
+ * Update docker image to go 1.21
+ * Remove use of logrus and use slog with sentry
+ * Bump golang.org/x/net from 0.14.0 to 0.17.0
+
+v8.3.24 (2023-10-10)
+-------------------------
+ * Fix handling IG like hearts
+ * Ignore attachments of type fallback on FBA channels
+ * More logrus replacement to use slog
+
+v8.3.23 (2023-10-04)
+-------------------------
+ * Switch channelevent.extra to always be strings
+ * Add optin_id to channels_channelevent
+ * Allow outgoing tests to check multiple requests
+
+v8.3.22 (2023-09-27)
+-------------------------
+ * Use Facebook API v17.0
+
+v8.3.21 (2023-09-25)
+-------------------------
+ * Support sending facebook message with opt-in auth token
+
+v8.3.20 (2023-09-21)
+-------------------------
+ * Switch to using optin ids instead of uuids
+
+v8.3.19 (2023-09-20)
+-------------------------
+ * Fix queueing of optin/optout events to mailroom
+ * Implement sending opt-in requests for FBA channels
+ * Simplfy handlers splitting up messages
+
+v8.3.18 (2023-09-18)
+-------------------------
+ * Add separate MsgIn and MsgOut interface types
+ * Use functional options pattern to create base handlers
+ * Improve testing of status updates from handlers and allow testing of multiple status updates per request
+ * Split up Meta notification payload into whatsapp and messenger specific parts
+
+v8.3.17 (2023-09-14)
+-------------------------
+ * Fix stop contact event task names
+ * Add support for FB notificaiton messages optin and optout events
+
+v8.3.16 (2023-09-13)
+-------------------------
+ * Simplify interfaces that handlers have access to
+ * Allow handlers to create arbitrary auth tokens with messages and channel events
+ * Rename legacy FB and WA handlers
+ * Refactor whatsapp handlers to be more DRY
+
+v8.3.15 (2023-09-12)
+-------------------------
+ * Stop reading from ContactURN.auth and remove from model
+
+v8.3.14 (2023-09-11)
+-------------------------
+ * Move whatsapp language matching into own util package and use i18n.BCP47Matcher
+ * Update to latest gocommon and use i18n.Locale
+ * Read from ContactURN.auth_tokens instead of .auth
+
+v8.3.13 (2023-09-06)
+-------------------------
+ * Start writing ContactURN.auth_tokens
+ * Update to latest null library and use Map[string] for channel event extra
+
+v8.3.12 (2023-09-06)
+-------------------------
+ * Do more debug logging and less info logging
+
+v8.3.11 (2023-09-06)
+-------------------------
+ * Add logging of requests with no associated channel
+ * No need to try making DB queries when all msg IDs got resolved from redis
+
+v8.3.10 (2023-09-05)
+-------------------------
+ * Don't rely on knowing msg id to determine if a log is attached
+ * Rework handler tests so that test cases must explicitly say if they don't generate a channel log
+
+v8.3.9 (2023-09-05)
+-------------------------
+ * Try to resolve sent external ids from redis
+ * For received messages without external id, de-dupe by hash of text+attachments instead of just text
+
+v8.3.8 (2023-08-31)
+-------------------------
+ * Update to latest redisx which fixes accuracy for sub-minute interval hashes
+ * Update to new batchers in gocommon which are more efficient
+
+v8.3.7 (2023-08-30)
+-------------------------
+ * Sender deletion handled by mailroom task
+
+v8.3.6 (2023-08-30)
+-------------------------
+ * Rework writing msg statuses to always use id resolving
+
+v8.3.5 (2023-08-30)
+-------------------------
+ * Rework writing status updates so that updates by external id also use the batcher
+
+v8.3.4 (2023-08-24)
+-------------------------
+ * Update channel type to save external ID for MO messages if we can, so we can dedupe by that
+ * Test with PostgreSQL 15
+
+v8.3.3 (2023-08-17)
+-------------------------
+ * Remove Legacy Twitter (TT) type registration
+ * Remove Blackmyna, Junebug, old Zenvia channel type handlers
+
+v8.3.2 (2023-08-16)
+-------------------------
+ * Fix retrieve media files for D3C
+
+v8.3.1 (2023-08-09)
+-------------------------
+ * Revert validator dep upgrade
+
+v8.3.0 (2023-08-09)
+-------------------------
+ * Update to go 1.20
+ * Update deps
+ * Add Messagebird channel type
+
 v8.2.1 (2023-08-03)
 -------------------------
  * Always save http_logs as [] rather than null
