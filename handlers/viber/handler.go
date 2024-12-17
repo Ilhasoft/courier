@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -141,9 +141,9 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		ContactName := payload.User.Name
 
 		// build the URN
-		urn, err := urns.NewURNFromParts(urns.ViberScheme, viberID, "", "")
+		urn, err := urns.New(urns.Viber, viberID)
 		if err != nil {
-			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid viber id"))
 		}
 		// build the channel event
 		channelEvent := h.Backend().NewChannelEvent(channel, courier.EventTypeWelcomeMessage, urn, clog).WithContactName(ContactName)
@@ -162,9 +162,9 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		ContactName := payload.User.Name
 
 		// build the URN
-		urn, err := urns.NewURNFromParts(urns.ViberScheme, viberID, "", "")
+		urn, err := urns.New(urns.Viber, viberID)
 		if err != nil {
-			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid viber id"))
 		}
 
 		// build the channel event
@@ -183,9 +183,9 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		viberID := payload.UserID
 
 		// build the URN
-		urn, err := urns.NewURNFromParts(urns.ViberScheme, viberID, "", "")
+		urn, err := urns.New(urns.Viber, viberID)
 		if err != nil {
-			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid viber id"))
 		}
 		// build the channel event
 		channelEvent := h.Backend().NewChannelEvent(channel, courier.EventTypeStopContact, urn, clog)
@@ -220,9 +220,9 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		contactName := payload.Sender.Name
 
 		// create our URN
-		urn, err := urns.NewURNFromParts(urns.ViberScheme, sender, "", "")
+		urn, err := urns.New(urns.Viber, sender)
 		if err != nil {
-			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid viber id"))
 		}
 
 		text := payload.Message.Text
@@ -348,14 +348,11 @@ type mtResponse struct {
 	StatusMessage string `json:"status_message"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	authToken := msg.Channel().StringConfigForKey(courier.ConfigAuthToken, "")
 	if authToken == "" {
-		return nil, fmt.Errorf("missing auth token in config")
+		return courier.ErrChannelConfig
 	}
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	// figure out whether we have a keyboard to send as well
 	qrs := msg.QuickReplies()
@@ -387,7 +384,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 				attURL = mediaURL
 				attSize, err = h.getAttachmentSize(mediaURL, clog)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				msgText = ""
 
@@ -396,7 +393,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 				attURL = mediaURL
 				attSize, err = h.getAttachmentSize(mediaURL, clog)
 				if err != nil {
-					return nil, err
+					return err
 				}
 				filename = "Audio"
 				msgText = ""
@@ -419,7 +416,6 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 			FileName:     filename,
 			Keyboard:     keyboard,
 		}
-
 		if attSize != -1 {
 			payload.Size = attSize
 		}
@@ -427,28 +423,28 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		requestBody := &bytes.Buffer{}
 		err = json.NewEncoder(requestBody).Encode(payload)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// build our request
 		req, err := http.NewRequest(http.MethodPost, sendURL, requestBody)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			clog.Error(courier.ErrorResponseStatusCode())
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
 		respPayload := &mtResponse{}
 		err = json.Unmarshal(respBody, respPayload)
 		if err != nil {
-			clog.Error(courier.ErrorResponseUnparseable("JSON"))
-			return status, nil
+			return courier.ErrResponseUnparseable
 		}
 
 		if respPayload.Status != 0 {
@@ -456,14 +452,12 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 			if !found {
 				errorMessage = "General error"
 			}
-			clog.Error(courier.ErrorExternal(strconv.Itoa(respPayload.Status), errorMessage))
-			return status, nil
+			return courier.ErrFailedWithReason(strconv.Itoa(respPayload.Status), errorMessage)
 		}
 
-		status.SetStatus(courier.MsgStatusWired)
 		keyboard = nil
 	}
-	return status, nil
+	return nil
 }
 
 func (h *handler) getAttachmentSize(u string, clog *courier.ChannelLog) (int, error) {

@@ -12,6 +12,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/jsonx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -102,7 +103,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	date := time.Unix(0, int64(payload.Timestamp*1000000)).UTC()
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(payload.From, channel.Country())
+	urn, err := urns.ParsePhone(payload.From, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -119,19 +120,12 @@ type mtPayload struct {
 	Message     string `json:"messageText"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for %s channel", msg.Channel().ChannelType())
-	}
-
 	token := msg.Channel().StringConfigForKey(courier.ConfigAuthToken, "")
-	if token == "" {
-		return nil, fmt.Errorf("no token set for %s channel", msg.Channel().ChannelType())
+	if username == "" || token == "" {
+		return courier.ErrChannelConfig
 	}
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	payload := mtPayload{}
 	payload.Destination = strings.TrimPrefix(msg.URN().Path(), "+")
@@ -141,23 +135,25 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	req, err := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(jsonPayload))
 	if err != nil {
-		return nil, err
+		return err
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("username", username)
 	req.Header.Set("authenticationtoken", token)
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	externalID, _ := jsonparser.GetString(respBody, "id")
 	if externalID != "" {
-		status.SetExternalID(externalID)
+		res.AddExternalID(externalID)
 	}
 
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	return nil
 }

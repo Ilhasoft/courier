@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/queue"
 	"github.com/nyaruka/gocommon/analytics"
+	"github.com/nyaruka/gocommon/cache"
 	"github.com/nyaruka/gocommon/dbutil"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/jsonx"
@@ -32,7 +34,6 @@ import (
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
 	"github.com/nyaruka/redisx"
-	"github.com/pkg/errors"
 )
 
 // the name for our message queue
@@ -65,6 +66,9 @@ type backend struct {
 	redisPool         *redis.Pool
 	attachmentStorage storage.Storage
 	logStorage        storage.Storage
+
+	channelsByUUID *cache.Local[courier.ChannelUUID, *Channel]
+	channelsByAddr *cache.Local[courier.ChannelAddress, *Channel]
 
 	stopChan  chan bool
 	waitGroup *sync.WaitGroup
@@ -129,21 +133,8 @@ func newBackend(cfg *courier.Config) courier.Backend {
 // Start starts our RapidPro backend, this tests our various connections and starts our spool flushers
 func (b *backend) Start() error {
 	// parse and test our redis config
-	log := slog.With(
-		"comp", "backend",
-		"state", "starting",
-	)
+	log := slog.With("comp", "backend", "state", "starting")
 	log.Info("starting backend")
-
-	// parse and test our db config
-	dbURL, err := url.Parse(b.config.DB)
-	if err != nil {
-		return fmt.Errorf("unable to parse DB URL '%s': %s", b.config.DB, err)
-	}
-
-	if dbURL.Scheme != "postgres" {
-		return fmt.Errorf("invalid DB URL: '%s', only postgres is supported", b.config.DB)
-	}
 
 	// build our db
 	db, err := sqlx.Open("postgres", b.config.DB)
@@ -166,46 +157,7 @@ func (b *backend) Start() error {
 		log.Info("db ok")
 	}
 
-	// parse and test our redis config
-	redisURL, err := url.Parse(b.config.Redis)
-	if err != nil {
-		return fmt.Errorf("unable to parse Redis URL '%s': %s", b.config.Redis, err)
-	}
-
-	// create our pool
-	redisPool := &redis.Pool{
-		Wait:        true,              // makes callers wait for a connection
-		MaxActive:   36,                // only open this many concurrent connections at once
-		MaxIdle:     4,                 // only keep up to this many idle
-		IdleTimeout: 240 * time.Second, // how long to wait before reaping a connection
-		Dial: func() (redis.Conn, error) {
-			conn, err := redis.Dial("tcp", redisURL.Host)
-			if err != nil {
-				return nil, err
-			}
-
-			// send auth if required
-			if redisURL.User != nil {
-				pass, authRequired := redisURL.User.Password()
-				if authRequired {
-					if _, err := conn.Do("AUTH", pass); err != nil {
-						conn.Close()
-						return nil, err
-					}
-				}
-			}
-
-			// switch to the right DB
-			_, err = conn.Do("SELECT", strings.TrimLeft(redisURL.Path, "/"))
-			return conn, err
-		},
-	}
-	b.redisPool = redisPool
-
-	// test our redis connection
-	conn := redisPool.Get()
-	defer conn.Close()
-	_, err = conn.Do("PING")
+	b.redisPool, err = redisx.NewPool(b.config.Redis)
 	if err != nil {
 		log.Error("redis not reachable", "error", err)
 	} else {
@@ -214,7 +166,7 @@ func (b *backend) Start() error {
 
 	// start our dethrottler if we are going to be doing some sending
 	if b.config.MaxWorkers > 0 {
-		queue.StartDethrottler(redisPool, b.stopChan, b.waitGroup, msgQueueName)
+		queue.StartDethrottler(b.redisPool, b.stopChan, b.waitGroup, msgQueueName)
 	}
 
 	// create our storage (S3 or file system)
@@ -242,6 +194,12 @@ func (b *backend) Start() error {
 		b.attachmentStorage = storage.NewFS(storageDir+"/attachments", 0766)
 		b.logStorage = storage.NewFS(storageDir+"/logs", 0766)
 	}
+
+	// create and start channel caches...
+	b.channelsByUUID = cache.NewLocal[courier.ChannelUUID, *Channel](b.loadChannelByUUID, time.Minute)
+	b.channelsByUUID.Start()
+	b.channelsByAddr = cache.NewLocal[courier.ChannelAddress, *Channel](b.loadChannelByAddress, time.Minute)
+	b.channelsByAddr.Start()
 
 	// check our storages
 	if err := checkStorage(b.attachmentStorage); err != nil {
@@ -293,6 +251,9 @@ func (b *backend) Stop() error {
 	// close our stop channel
 	close(b.stopChan)
 
+	b.channelsByUUID.Stop()
+	b.channelsByAddr.Stop()
+
 	// wait for our threads to exit
 	b.waitGroup.Wait()
 	return nil
@@ -321,27 +282,37 @@ func (b *backend) Cleanup() error {
 }
 
 // GetChannel returns the channel for the passed in type and UUID
-func (b *backend) GetChannel(ctx context.Context, ct courier.ChannelType, uuid courier.ChannelUUID) (courier.Channel, error) {
+func (b *backend) GetChannel(ctx context.Context, typ courier.ChannelType, uuid courier.ChannelUUID) (courier.Channel, error) {
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
-	ch, err := getChannel(timeout, b.db, ct, uuid)
+	ch, err := b.channelsByUUID.GetOrFetch(timeout, uuid)
 	if err != nil {
 		return nil, err // so we don't return a non-nil interface and nil ptr
 	}
-	return ch, err
+
+	if typ != courier.AnyChannelType && ch.ChannelType() != typ {
+		return nil, courier.ErrChannelWrongType
+	}
+
+	return ch, nil
 }
 
 // GetChannelByAddress returns the channel with the passed in type and address
-func (b *backend) GetChannelByAddress(ctx context.Context, ct courier.ChannelType, address courier.ChannelAddress) (courier.Channel, error) {
+func (b *backend) GetChannelByAddress(ctx context.Context, typ courier.ChannelType, address courier.ChannelAddress) (courier.Channel, error) {
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
-	ch, err := getChannelByAddress(timeout, b.db, ct, address)
+	ch, err := b.channelsByAddr.GetOrFetch(timeout, address)
 	if err != nil {
 		return nil, err // so we don't return a non-nil interface and nil ptr
 	}
-	return ch, err
+
+	if typ != courier.AnyChannelType && ch.ChannelType() != typ {
+		return nil, courier.ErrChannelWrongType
+	}
+
+	return ch, nil
 }
 
 // GetContact returns the contact for the passed in channel and URN
@@ -388,7 +359,7 @@ func (b *backend) DeleteMsgByExternalID(ctx context.Context, channel courier.Cha
 	var msgID courier.MsgID
 	var contactID ContactID
 	if err := row.Scan(&msgID, &contactID); err != nil && err != sql.ErrNoRows {
-		return errors.Wrap(err, "error querying deleted msg")
+		return fmt.Errorf("error querying deleted msg: %w", err)
 	}
 
 	if msgID != courier.NilMsgID && contactID != NilContactID {
@@ -396,7 +367,7 @@ func (b *backend) DeleteMsgByExternalID(ctx context.Context, channel courier.Cha
 		defer rc.Close()
 
 		if err := queueMsgDeleted(rc, ch, msgID, contactID); err != nil {
-			return errors.Wrap(err, "error queuing message deleted task")
+			return fmt.Errorf("error queuing message deleted task: %w", err)
 		}
 	}
 
@@ -445,7 +416,7 @@ func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.MsgOut, error
 		err = json.Unmarshal([]byte(msgJSON), dbMsg)
 		if err != nil {
 			queue.MarkComplete(rc, msgQueueName, token)
-			return nil, errors.Wrapf(err, "unable to unmarshal message: %s", string(msgJSON))
+			return nil, fmt.Errorf("unable to unmarshal message: %s: %w", string(msgJSON), err)
 		}
 
 		// populate the channel on our db msg
@@ -565,7 +536,7 @@ func (b *backend) WriteStatusUpdate(ctx context.Context, status courier.StatusUp
 	if oldURN != urns.NilURN && newURN != urns.NilURN {
 		err := b.updateContactURN(ctx, status)
 		if err != nil {
-			return errors.Wrap(err, "error updating contact URN")
+			return fmt.Errorf("error updating contact URN: %w", err)
 		}
 	}
 
@@ -604,7 +575,7 @@ func (b *backend) updateContactURN(ctx context.Context, status courier.StatusUpd
 	// retrieve channel
 	channel, err := b.GetChannel(ctx, courier.AnyChannelType, status.ChannelUUID())
 	if err != nil {
-		return errors.Wrap(err, "error retrieving channel")
+		return fmt.Errorf("error retrieving channel: %w", err)
 	}
 	dbChannel := channel.(*Channel)
 	tx, err := b.db.BeginTxx(ctx, nil)
@@ -614,7 +585,7 @@ func (b *backend) updateContactURN(ctx context.Context, status courier.StatusUpd
 	// retrieve the old URN
 	oldContactURN, err := getContactURNByIdentity(tx, dbChannel.OrgID(), old)
 	if err != nil {
-		return errors.Wrap(err, "error retrieving old contact URN")
+		return fmt.Errorf("error retrieving old contact URN: %w", err)
 	}
 	// retrieve the new URN
 	newContactURN, err := getContactURNByIdentity(tx, dbChannel.OrgID(), new)
@@ -627,11 +598,11 @@ func (b *backend) updateContactURN(ctx context.Context, status courier.StatusUpd
 			err = fullyUpdateContactURN(tx, oldContactURN)
 			if err != nil {
 				tx.Rollback()
-				return errors.Wrap(err, "error updating old contact URN")
+				return fmt.Errorf("error updating old contact URN: %w", err)
 			}
 			return tx.Commit()
 		}
-		return errors.Wrap(err, "error retrieving new contact URN")
+		return fmt.Errorf("error retrieving new contact URN: %w", err)
 	}
 
 	// only update the new URN if it doesn't have an associated contact
@@ -645,12 +616,12 @@ func (b *backend) updateContactURN(ctx context.Context, status courier.StatusUpd
 	err = fullyUpdateContactURN(tx, newContactURN)
 	if err != nil {
 		tx.Rollback()
-		return errors.Wrap(err, "error updating new contact URN")
+		return fmt.Errorf("error updating new contact URN: %w", err)
 	}
 	err = fullyUpdateContactURN(tx, oldContactURN)
 	if err != nil {
 		tx.Rollback()
-		return errors.Wrap(err, "error updating old contact URN")
+		return fmt.Errorf("error updating old contact URN: %w", err)
 	}
 	return tx.Commit()
 }
@@ -692,7 +663,7 @@ func (b *backend) SaveAttachment(ctx context.Context, ch courier.Channel, conten
 
 	storageURL, err := b.attachmentStorage.Put(ctx, path, contentType, data)
 	if err != nil {
-		return "", errors.Wrapf(err, "error saving attachment to storage (bytes=%d)", len(data))
+		return "", fmt.Errorf("error saving attachment to storage (bytes=%d): %w", len(data), err)
 	}
 
 	return storageURL, nil
@@ -702,13 +673,13 @@ func (b *backend) SaveAttachment(ctx context.Context, ch courier.Channel, conten
 func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Media, error) {
 	u, err := url.Parse(mediaUrl)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error parsing media URL")
+		return nil, fmt.Errorf("error parsing media URL: %w", err)
 	}
 
 	mediaUUID := uuidRegex.FindString(u.Path)
 
 	// if hostname isn't our media domain, or path doesn't contain a UUID, don't try to resolve
-	if u.Hostname() != b.config.MediaDomain || mediaUUID == "" {
+	if strings.Replace(u.Hostname(), fmt.Sprintf("%s.", b.config.S3Region), "", -1) != b.config.MediaDomain || mediaUUID == "" {
 		return nil, nil
 	}
 
@@ -721,7 +692,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	var media *Media
 	mediaJSON, err := b.mediaCache.Get(rc, mediaUUID)
 	if err != nil {
-		return nil, errors.Wrap(err, "error looking up cached media")
+		return nil, fmt.Errorf("error looking up cached media: %w", err)
 	}
 	if mediaJSON != "" {
 		jsonx.MustUnmarshal([]byte(mediaJSON), &media)
@@ -729,7 +700,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 		// lookup media in our database
 		media, err = lookupMediaFromUUID(ctx, b.db, uuids.UUID(mediaUUID))
 		if err != nil {
-			return nil, errors.Wrap(err, "error looking up media")
+			return nil, fmt.Errorf("error looking up media: %w", err)
 		}
 
 		// cache it for future requests
@@ -737,7 +708,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	}
 
 	// if we found a media record but it doesn't match the URL, don't use it
-	if media == nil || media.URL() != mediaUrl {
+	if media == nil || (media.URL() != mediaUrl && media.URL() != strings.Replace(mediaUrl, fmt.Sprintf("%s.", b.config.S3Region), "", -1)) {
 		return nil, nil
 	}
 
@@ -785,11 +756,11 @@ func (b *backend) Heartbeat() error {
 
 	active, err := redis.Strings(rc.Do("ZRANGE", fmt.Sprintf("%s:active", msgQueueName), "0", "-1"))
 	if err != nil {
-		return errors.Wrapf(err, "error getting active queues")
+		return fmt.Errorf("error getting active queues: %w", err)
 	}
 	throttled, err := redis.Strings(rc.Do("ZRANGE", fmt.Sprintf("%s:throttled", msgQueueName), "0", "-1"))
 	if err != nil {
-		return errors.Wrapf(err, "error getting throttled queues")
+		return fmt.Errorf("error getting throttled queues: %w", err)
 	}
 	queues := append(active, throttled...)
 
@@ -799,14 +770,14 @@ func (b *backend) Heartbeat() error {
 		q := fmt.Sprintf("%s/1", queue)
 		count, err := redis.Int(rc.Do("ZCARD", q))
 		if err != nil {
-			return errors.Wrapf(err, "error getting size of priority queue: %s", q)
+			return fmt.Errorf("error getting size of priority queue: %s: %w", q, err)
 		}
 		prioritySize += count
 
 		q = fmt.Sprintf("%s/0", queue)
 		count, err = redis.Int(rc.Do("ZCARD", q))
 		if err != nil {
-			return errors.Wrapf(err, "error getting size of bulk queue: %s", q)
+			return fmt.Errorf("error getting size of bulk queue: %s: %w", q, err)
 		}
 		bulkSize += count
 	}
@@ -891,7 +862,7 @@ func (b *backend) Status() string {
 
 		// try to look up our channel
 		channelUUID := courier.ChannelUUID(uuid)
-		channel, err := getChannel(context.Background(), b.db, courier.AnyChannelType, channelUUID)
+		channel, err := b.GetChannel(context.Background(), courier.AnyChannelType, channelUUID)
 		channelType := "!!"
 		if err == nil {
 			channelType = string(channel.ChannelType())

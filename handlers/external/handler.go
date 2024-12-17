@@ -17,7 +17,6 @@ import (
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/gsm7"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -100,15 +99,14 @@ func (h *handler) receiveStopContact(ctx context.Context, channel courier.Channe
 
 	// create our URN
 	urn := urns.NilURN
-	if channel.Schemes()[0] == urns.TelScheme {
-		urn, err = handlers.StrictTelForCountry(form.From, channel.Country())
+	if channel.Schemes()[0] == urns.Phone.Prefix {
+		urn, err = urns.ParsePhone(form.From, channel.Country(), true, false)
 	} else {
-		urn, err = urns.NewURNFromParts(channel.Schemes()[0], form.From, "", "")
+		urn, err = urns.NewFromParts(channel.Schemes()[0], form.From, nil, "")
 	}
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
-	urn = urn.Normalize("")
 
 	// create a stop channel event
 	channelEvent := h.Backend().NewChannelEvent(channel, courier.EventTypeStopContact, urn, clog)
@@ -178,7 +176,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 			err = r.ParseForm()
 		}
 		if err != nil {
-			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.Wrapf(err, "invalid request"))
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("invalid request: %w", err))
 		}
 
 		from = getFormField(r.Form, defaultFromFields, channel.StringConfigForKey(configMOFromField, ""))
@@ -202,15 +200,14 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 
 	// create our URN
 	urn := urns.NilURN
-	if channel.Schemes()[0] == urns.TelScheme {
-		urn, err = handlers.StrictTelForCountry(from, channel.Country())
+	if channel.Schemes()[0] == urns.Phone.Prefix {
+		urn, err = urns.ParsePhone(from, channel.Country(), true, false)
 	} else {
-		urn, err = urns.NewURNFromParts(channel.Schemes()[0], from, "", "")
+		urn, err = urns.NewFromParts(channel.Schemes()[0], from, nil, "")
 	}
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
-	urn = urn.Normalize(channel.Country())
 
 	// build our msg
 	msg := h.Backend().NewIncomingMsg(channel, urn, text, "", clog).WithReceivedOn(date)
@@ -270,13 +267,12 @@ func (h *handler) receiveStatus(ctx context.Context, statusString string, channe
 	return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	channel := msg.Channel()
 
 	sendURL := channel.StringConfigForKey(courier.ConfigSendURL, "")
 	if sendURL == "" {
-		return nil, fmt.Errorf("no send url set for EX channel")
+		return courier.ErrChannelConfig
 	}
 
 	// figure out what encoding to tell kannel to send as
@@ -291,7 +287,6 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		contentTypeHeader = contentType
 	}
 
-	status := h.Backend().NewStatusUpdate(channel, msg.ID(), courier.MsgStatusErrored, clog)
 	parts := handlers.SplitMsgByChannel(channel, handlers.GetTextAndAttachments(msg), sendMaxLength)
 	for i, part := range parts {
 		// build our request
@@ -311,9 +306,9 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 		// if we are meant to use national formatting (no country code) pull that out
 		if useNational {
-			nationalTo := msg.URN().Localize(channel.Country())
-			form["to"] = nationalTo.Path()
-			form["to_no_plus"] = nationalTo.Path()
+			nationalTo := urns.ToLocalPhone(msg.URN(), channel.Country())
+			form["to"] = nationalTo
+			form["to_no_plus"] = nationalTo
 		}
 
 		// if we are smart, first try to convert to GSM7 chars
@@ -347,9 +342,8 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		}
 
 		req, err := http.NewRequest(sendMethod, url, body)
-
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", contentTypeHeader)
 
@@ -365,18 +359,18 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		}
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
-		if responseCheck == "" || strings.Contains(string(respBody), responseCheck) {
-			status.SetStatus(courier.MsgStatusWired)
-		} else {
-			clog.Error(courier.ErrorResponseUnexpected(responseCheck))
+		if responseCheck != "" && !strings.Contains(string(respBody), responseCheck) {
+			return courier.ErrResponseUnexpected
 		}
 	}
 
-	return status, nil
+	return nil
 }
 
 type quickReplyXMLItem struct {

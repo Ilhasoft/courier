@@ -3,6 +3,7 @@ package kaleyra
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -16,7 +17,6 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -80,9 +80,9 @@ func (h *handler) receiveMsg(ctx context.Context, channel courier.Channel, w htt
 	}
 
 	// build urn
-	urn, err := urns.NewWhatsAppURN(form.From)
+	urn, err := urns.New(urns.WhatsApp, form.From)
 	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid whatsapp id"))
 	}
 
 	// parse created_at timestamp
@@ -107,7 +107,7 @@ var statusMapping = map[string]courier.MsgStatus{
 	"0":         courier.MsgStatusFailed,
 	"sent":      courier.MsgStatusWired,
 	"delivered": courier.MsgStatusDelivered,
-	"read":      courier.MsgStatusDelivered,
+	"read":      courier.MsgStatusRead,
 }
 
 // receiveStatus is our HTTP handler function for outgoing messages statuses
@@ -134,16 +134,13 @@ func (h *handler) receiveStatus(ctx context.Context, channel courier.Channel, w 
 	return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	accountSID := msg.Channel().StringConfigForKey(configAccountSID, "")
 	apiKey := msg.Channel().StringConfigForKey(configApiKey, "")
 
 	if accountSID == "" || apiKey == "" {
-		return nil, errors.New("no account_sid or api_key config")
+		return courier.ErrChannelConfig
 	}
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	sendURL := fmt.Sprintf("%s/v1/%s/messages", baseURL, accountSID)
 	var kwaResp *http.Response
@@ -222,19 +219,21 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		kwaResp, kwaRespBody, kwaErr = h.RequestHTTP(req, clog)
 	}
 
-	if kwaErr != nil || kwaResp.StatusCode/100 != 2 {
-		status.SetStatus(courier.MsgStatusFailed)
-		return status, nil
+	if kwaErr != nil || kwaResp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if kwaResp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	// record external id from the last sent msg request
 	externalID, err := jsonparser.GetString(kwaRespBody, "id")
-	if err == nil {
-		status.SetExternalID(externalID)
+	if err != nil {
+		clog.Error(courier.ErrorResponseValueMissing("id"))
+	} else {
+		res.AddExternalID(externalID)
 	}
 
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	return nil
 }
 
 func (h *handler) newSendForm(channel courier.Channel, msgType, toContact string) map[string]string {

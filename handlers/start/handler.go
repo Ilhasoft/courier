@@ -17,6 +17,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -69,7 +70,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(payload.From, channel.Country())
+	urn, err := urns.ParsePhone(payload.From, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -121,20 +122,15 @@ type mtResponse struct {
 	State   string   `xml:"state"`
 }
 
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for ST channel: %s", msg.Channel().UUID())
-	}
-
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return nil, fmt.Errorf("no password set for ST channel: %s", msg.Channel().UUID())
+	if username == "" || password == "" {
+		return courier.ErrChannelConfig
 	}
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 	parts := handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
-	for i, part := range parts {
+	for _, part := range parts {
 
 		payload := mtPayload{
 			Service: mtService{
@@ -153,33 +149,38 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		requestBody := &bytes.Buffer{}
 		err := xml.NewEncoder(requestBody).Encode(payload)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// build our request
 		req, err := http.NewRequest(http.MethodPost, sendURL, requestBody)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", "application/xml; charset=utf8")
 		req.SetBasicAuth(username, password)
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
 		response := &mtResponse{}
 		err = xml.Unmarshal(respBody, response)
-		if err == nil {
-			status.SetStatus(courier.MsgStatusWired)
-			if i == 0 {
-				status.SetExternalID(response.ID)
-			}
+		if err != nil {
+			return courier.ErrResponseUnparseable
 		}
+
+		if response.ID == "" {
+			return courier.ErrResponseUnexpected
+		}
+
+		res.AddExternalID(response.ID)
 	}
 
-	return status, nil
+	return nil
 }
 
 func (h *handler) RedactValues(ch courier.Channel) []string {

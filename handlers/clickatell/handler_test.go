@@ -1,97 +1,16 @@
 package clickatell
 
 import (
-	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
-
-// setSendURL takes care of setting the sendURL to call
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
-var successSendResponse = `{"messages":[{"apiMessageId":"id1002","accepted":true,"to":"12067799299","error":null}],"error":null}`
-var failSendResponse = `{"messages":[],"error":"Two-Way integration error - From number is not related to integration"}`
-
-var defaultSendTestCases = []OutgoingTestCase{
-	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   successSendResponse,
-		MockResponseStatus: 200,
-		ExpectedURLParams:  map[string]string{"content": "Simple Message", "to": "250788383383", "from": "2020", "apiKey": "API-KEY"},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "id1002",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Unicode Send",
-		MsgText:            "Unicode ☺",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   successSendResponse,
-		MockResponseStatus: 200,
-		ExpectedURLParams:  map[string]string{"content": "Unicode ☺", "to": "250788383383", "from": "2020", "apiKey": "API-KEY"},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "id1002",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Send Attachment",
-		MsgText:            "My pic!",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   successSendResponse,
-		MockResponseStatus: 200,
-		ExpectedURLParams:  map[string]string{"content": "My pic!\nhttps://foo.bar/image.jpg", "to": "250788383383", "from": "2020", "apiKey": "API-KEY"},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "id1002",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `Error`,
-		MockResponseStatus: 400,
-		ExpectedURLParams:  map[string]string{"content": "Error Message", "to": "250788383383", "from": "2020", "apiKey": "API-KEY"},
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Error Response",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   failSendResponse,
-		MockResponseStatus: 200,
-		ExpectedURLParams:  map[string]string{"content": "Error Message", "to": "250788383383", "from": "2020", "apiKey": "API-KEY"},
-		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("apiMessageId")},
-		SendPrep:           setSendURL,
-	},
-}
-
-func TestOutgoing(t *testing.T) {
-	maxMsgLength = 160
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "CT", "2020", "US",
-		map[string]any{
-			courier.ConfigAPIKey: "API-KEY",
-		})
-
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{"API-KEY"}, nil)
-}
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "CT", "2020", "US",
-		map[string]any{
-			courier.ConfigAPIKey: "12345",
-		}),
-}
 
 const (
 	statusURL  = "/c/ct/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status"
@@ -130,7 +49,7 @@ const (
 	}`
 )
 
-var testCases = []IncomingTestCase{
+var incomingCases = []IncomingTestCase{
 	{
 		Label:                "Valid Receive",
 		URL:                  receiveURL,
@@ -158,7 +77,7 @@ var testCases = []IncomingTestCase{
 		URL:                  receiveURL,
 		Data:                 invalidURN,
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	{
 		Label:                "Error invalid JSON",
@@ -225,9 +144,93 @@ var testCases = []IncomingTestCase{
 }
 
 func TestIncoming(t *testing.T) {
-	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "CT", "2020", "US", []string{urns.Phone.Prefix}, map[string]any{courier.ConfigAPIKey: "12345"}),
+	}
+
+	RunIncomingTestCases(t, chs, newHandler(), incomingCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
+var successSendResponse = `{"messages":[{"apiMessageId":"id1002","accepted":true,"to":"12067799299","error":null}],"error":null}`
+var failSendResponse = `{"messages":[],"error":"Two-Way integration error - From number is not related to integration"}`
+
+var outgoingCases = []OutgoingTestCase{
+	{
+		Label:   "Plain Send",
+		MsgText: "Simple Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://platform.clickatell.com/messages/http/send*": {
+				httpx.NewMockResponse(200, nil, []byte(successSendResponse)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Params: url.Values{"content": {"Simple Message"}, "to": {"250788383383"}, "from": {"2020"}, "apiKey": {"API-KEY"}}},
+		},
+		ExpectedExtIDs: []string{"id1002"},
+	},
+	{
+		Label:   "Unicode Send",
+		MsgText: "Unicode ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://platform.clickatell.com/messages/http/send*": {
+				httpx.NewMockResponse(200, nil, []byte(successSendResponse)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Params: url.Values{"content": {"Unicode ☺"}, "to": {"250788383383"}, "from": {"2020"}, "apiKey": {"API-KEY"}}},
+		},
+		ExpectedExtIDs: []string{"id1002"},
+	},
+	{
+		Label:          "Send Attachment",
+		MsgText:        "My pic!",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://platform.clickatell.com/messages/http/send*": {
+				httpx.NewMockResponse(200, nil, []byte(successSendResponse)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Params: url.Values{"content": {"My pic!\nhttps://foo.bar/image.jpg"}, "to": {"250788383383"}, "from": {"2020"}, "apiKey": {"API-KEY"}}},
+		},
+		ExpectedExtIDs: []string{"id1002"},
+	},
+	{
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://platform.clickatell.com/messages/http/send*": {
+				httpx.NewMockResponse(400, nil, []byte(`Error`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Params: url.Values{"content": {"Error Message"}, "to": {"250788383383"}, "from": {"2020"}, "apiKey": {"API-KEY"}}},
+		},
+		ExpectedError: courier.ErrResponseStatus,
+	},
+	{
+		Label:   "Error Response",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://platform.clickatell.com/messages/http/send*": {
+				httpx.NewMockResponse(200, nil, []byte(failSendResponse)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Params: url.Values{"content": {"Error Message"}, "to": {"250788383383"}, "from": {"2020"}, "apiKey": {"API-KEY"}}},
+		},
+		ExpectedError: courier.ErrResponseUnexpected,
+	},
+}
+
+func TestOutgoing(t *testing.T) {
+	maxMsgLength = 160
+	ch := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "CT", "2020", "US", []string{urns.Phone.Prefix}, map[string]any{courier.ConfigAPIKey: "API-KEY"})
+
+	RunOutgoingTestCases(t, ch, newHandler(), outgoingCases, []string{"API-KEY"}, nil)
 }

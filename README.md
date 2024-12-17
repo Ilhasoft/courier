@@ -1,4 +1,4 @@
-# Courier
+# 🛫 Courier
 
 [![Build Status](https://github.com/nyaruka/courier/workflows/CI/badge.svg)](https://github.com/nyaruka/courier/actions?query=workflow%3ACI) 
 [![codecov](https://codecov.io/gh/nyaruka/courier/branch/main/graph/badge.svg)](https://codecov.io/gh/nyaruka/courier)
@@ -41,6 +41,7 @@ For use with RapidPro/TextIt, you will want to configure these settings:
  * `COURIER_SPOOL_DIR`: A local path where courier can spool files if the database is down, should be writable. (ex: `/home/courier/spool`)
  * `COURIER_DB`: Details parameters used to connect to the Postgres RapidPro database (ex: `postgres://textit:fooman@rds.courier.io/5432/textit`)
  * `COURIER_REDIS`: Details parameters to use to connect to Redis RapidPro database (ex: `redis://redis-internal.courier.io:6379/13`)
+ * `COURIER_AUTH_TOKEN`: authentication token to require for requests from Mailroom
  
 For writing of message attachments, Courier needs access to an S3 bucket, you can configure access to your bucket via:
 

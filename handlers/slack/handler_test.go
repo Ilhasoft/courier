@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/buger/jsonparser"
@@ -25,7 +24,7 @@ const (
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel(channelUUID, "SL", "2022", "US", map[string]any{"bot_token": "xoxb-abc123", "verification_token": "one-long-verification-token"}),
+	test.NewMockChannel(channelUUID, "SL", "2022", "US", []string{urns.Slack.Prefix}, map[string]any{"bot_token": "xoxb-abc123", "verification_token": "one-long-verification-token"}),
 }
 
 const helloMsg = `{
@@ -124,10 +123,6 @@ const videoFileMsg = `{
 	"event_time": 1653427243
 }`
 
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	apiURL = s.URL
-}
-
 var handleTestCases = []IncomingTestCase{
 	{
 		Label:                "Receive Hello Msg",
@@ -179,35 +174,45 @@ var handleTestCases = []IncomingTestCase{
 
 var defaultSendTestCases = []OutgoingTestCase{
 	{
-		Label:               "Plain Send",
-		MsgText:             "Simple Message",
-		MsgURN:              "slack:U0123ABCDEF",
-		MockResponseBody:    `{"ok":true,"channel":"U0123ABCDEF"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"channel":"U0123ABCDEF","text":"Simple Message"}`,
-		ExpectedMsgStatus:   "W",
-		SendPrep:            setSendURL,
+		Label:   "Plain Send",
+		MsgText: "Simple Message",
+		MsgURN:  "slack:U0123ABCDEF",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/chat.postMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ok":true,"channel":"U0123ABCDEF"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Body: `{"channel":"U0123ABCDEF","text":"Simple Message"}`,
+		}},
 	},
 	{
-		Label:               "Unicode Send",
-		MsgText:             "☺",
-		MsgURN:              "slack:U0123ABCDEF",
-		MockResponseBody:    `{"ok":true,"channel":"U0123ABCDEF"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"channel":"U0123ABCDEF","text":"☺"}`,
-		ExpectedMsgStatus:   "W",
-		SendPrep:            setSendURL,
+		Label:   "Unicode Send",
+		MsgText: "☺",
+		MsgURN:  "slack:U0123ABCDEF",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/chat.postMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ok":true,"channel":"U0123ABCDEF"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Body: `{"channel":"U0123ABCDEF","text":"☺"}`,
+		}},
 	},
 	{
-		Label:               "Send Text Auth Error",
-		MsgText:             "Hello",
-		MsgURN:              "slack:U0123ABCDEF",
-		MockResponseBody:    `{"ok":false,"error":"invalid_auth"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"channel":"U0123ABCDEF","text":"Hello"}`,
-		ExpectedMsgStatus:   "E",
-		ExpectedErrors:      []*courier.ChannelError{courier.NewChannelError("", "", "invalid_auth")},
-		SendPrep:            setSendURL,
+		Label:   "Send Text Auth Error",
+		MsgText: "Hello",
+		MsgURN:  "slack:U0123ABCDEF",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/chat.postMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ok":false,"error":"invalid_auth"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Body: `{"channel":"U0123ABCDEF","text":"Hello"}`,
+		}},
+		ExpectedError:     courier.ErrFailedWithReason("", "invalid_auth"),
+		ExpectedLogErrors: []*courier.ChannelError{courier.NewChannelError("", "", "invalid_auth")},
 	},
 }
 
@@ -217,30 +222,18 @@ var fileSendTestCases = []OutgoingTestCase{
 		MsgText:        "",
 		MsgURN:         "slack:U0123ABCDEF",
 		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.png"},
-		MockResponses: map[MockedRequest]*httpx.MockResponse{
-			{
-				Method:       "POST",
-				Path:         "/files.upload",
-				BodyContains: "image.png",
-			}: httpx.NewMockResponse(200, nil, []byte(`{"ok":true,"file":{"id":"F1L3SL4CK1D"}}`)),
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/image.png": {
+				httpx.NewMockResponse(200, nil, []byte(`filetype... ...file bytes... ...end`)),
+			},
+			"*/files.upload": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ok":true,"file":{"id":"F1L3SL4CK1D"}}`)),
+			},
 		},
-		ExpectedMsgStatus: "W",
-		SendPrep:          setSendURL,
-	},
-	{
-		Label:          "Send Image",
-		MsgText:        "",
-		MsgURN:         "slack:U0123ABCDEF",
-		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.png"},
-		MockResponses: map[MockedRequest]*httpx.MockResponse{
-			{
-				Method:       "POST",
-				Path:         "/files.upload",
-				BodyContains: "image.png",
-			}: httpx.NewMockResponse(200, nil, []byte(`{"ok":true,"file":{"id":"F1L3SL4CK1D"}}`)),
+		ExpectedRequests: []ExpectedRequest{
+			{},
+			{BodyContains: "image.png"},
 		},
-		ExpectedMsgStatus: "W",
-		SendPrep:          setSendURL,
 	},
 }
 
@@ -256,10 +249,6 @@ func TestOutgoing(t *testing.T) {
 }
 
 func TestSendFiles(t *testing.T) {
-	fileServer := buildMockAttachmentFileServer()
-	defer fileServer.Close()
-	fileSendTestCases := mockAttachmentURLs(fileServer, fileSendTestCases)
-
 	RunOutgoingTestCases(t, testChannels[0], newHandler(), fileSendTestCases, []string{"xoxb-abc123", "one-long-verification-token"}, nil)
 }
 
@@ -275,14 +264,6 @@ func TestVerification(t *testing.T) {
 			Headers: map[string]string{"content-type": "text/plain"},
 		},
 	})
-}
-
-func buildMockAttachmentFileServer() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		w.WriteHeader(200)
-		w.Write([]byte("filetype... ...file bytes... ...end"))
-	}))
 }
 
 func buildMockSlackService(testCases []IncomingTestCase) *httptest.Server {
@@ -342,27 +323,14 @@ func buildMockSlackService(testCases []IncomingTestCase) *httptest.Server {
 	return server
 }
 
-func mockAttachmentURLs(fileServer *httptest.Server, testCases []OutgoingTestCase) []OutgoingTestCase {
-	casesWithMockedUrls := make([]OutgoingTestCase, len(testCases))
-
-	for i, testCase := range testCases {
-		mockedCase := testCase
-		for j, attachment := range testCase.MsgAttachments {
-			mockedCase.MsgAttachments[j] = strings.Replace(attachment, "https://foo.bar", fileServer.URL, 1)
-		}
-		casesWithMockedUrls[i] = mockedCase
-	}
-	return casesWithMockedUrls
-}
-
 func TestDescribeURN(t *testing.T) {
 	server := buildMockSlackService([]IncomingTestCase{})
 	defer server.Close()
 
 	handler := newHandler()
-	handler.Initialize(test.NewMockServer(courier.NewConfig(), test.NewMockBackend()))
+	handler.Initialize(test.NewMockServer(courier.NewDefaultConfig(), test.NewMockBackend()))
 	clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, testChannels[0], handler.RedactValues(testChannels[0]))
-	urn, _ := urns.NewURNFromParts(urns.SlackScheme, "U012345", "", "")
+	urn, _ := urns.New(urns.Slack, "U012345")
 
 	data := map[string]string{"name": "dummy user"}
 

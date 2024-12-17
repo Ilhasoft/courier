@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,7 +15,7 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
-	"github.com/pkg/errors"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -57,7 +58,7 @@ func (h *handler) receiveMessage(ctx context.Context, c courier.Channel, w http.
 		return nil, handlers.WriteAndLogRequestError(ctx, h, c, w, r, err)
 	}
 
-	urn, err := handlers.StrictTelForCountry(payload.Sender, c.Country())
+	urn, err := urns.ParsePhone(payload.Sender, c.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, c, w, r, err)
 	}
@@ -75,17 +76,20 @@ type mtPayload struct {
 	UDH      string `json:"UDH"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
+	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
+	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
+	if username == "" || password == "" {
+		return courier.ErrChannelConfig
+	}
 
-	token, err := h.FetchToken(ctx, msg.Channel(), msg, clog)
+	token, err := h.FetchToken(ctx, msg.Channel(), msg, username, password, clog)
 	if err != nil {
-		return status, errors.Wrapf(err, "unable to fetch token")
+		return err
 	}
 
 	parts := handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
-	for i, part := range parts {
+	for _, part := range parts {
 		payload := &mtPayload{}
 		payload.Mobile = strings.TrimPrefix(msg.URN().Path(), "+")
 		payload.Message = part
@@ -100,7 +104,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		// build our request
 		req, err := http.NewRequest(http.MethodPost, sendURL, requestBody)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -108,47 +112,31 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
-
-		status.SetStatus(courier.MsgStatusWired)
 
 		// try to get the message id out
 		id, _ := jsonparser.GetString(respBody, "Data", "MessageID")
-		if id != "" && i == 0 {
-			status.SetExternalID(id)
+		if id != "" {
+			res.AddExternalID(id)
 		}
 	}
-
-	return status, nil
-}
-
-type tokenResponse struct {
-	AccessToken string `json:"access_token" validate:"required"`
+	return nil
 }
 
 // FetchToken gets the current token for this channel, either from Redis if cached or by requesting it
-func (h *handler) FetchToken(ctx context.Context, channel courier.Channel, msg courier.MsgOut, clog *courier.ChannelLog) (string, error) {
+func (h *handler) FetchToken(ctx context.Context, channel courier.Channel, msg courier.MsgOut, username, password string, clog *courier.ChannelLog) (string, error) {
 	// first check whether we have it in redis
 	conn := h.Backend().RedisPool().Get()
-	token, err := redis.String(conn.Do("GET", fmt.Sprintf("hm_token_%s", channel.UUID())))
+	token, _ := redis.String(conn.Do("GET", fmt.Sprintf("hm_token_%s", channel.UUID())))
 	conn.Close()
 
 	// got a token, use it
 	if token != "" {
 		return token, nil
-	}
-
-	// no token, lets go fetch one
-	username := channel.StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return "", fmt.Errorf("Missing 'username' config for HM channel")
-	}
-
-	password := channel.StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return "", fmt.Errorf("Missing 'password' config for HM channel")
 	}
 
 	form := url.Values{
@@ -163,21 +151,29 @@ func (h *handler) FetchToken(ctx context.Context, channel courier.Channel, msg c
 	req.Header.Set("Accept", "application/json")
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return "", errors.Wrapf(err, "error making token request")
+	if err != nil {
+		return "", courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return "", courier.ErrResponseStatus
 	}
 
 	token, err = jsonparser.GetString(respBody, "access_token")
 	if err != nil {
-		return "", errors.Wrapf(err, "error getting access_token from response")
+		return "", fmt.Errorf("error getting access_token from response: %w", err)
 	}
 	if token == "" {
-		return "", errors.Errorf("no access token returned")
+		return "", errors.New("no access token returned")
 	}
 
-	// we got a token, cache it to redis with a 90 minute expiration
+	expiration, err := jsonparser.GetInt(respBody, "expires_in")
+
+	if err != nil {
+		expiration = 3600
+	}
+
+	// we got a token, cache it to redis with an expiration from the response(we default to 60 minutes)
 	conn = h.Backend().RedisPool().Get()
-	_, err = conn.Do("SETEX", fmt.Sprintf("hm_token_%s", channel.UUID()), 5340, token)
+	_, err = conn.Do("SETEX", fmt.Sprintf("hm_token_%s", channel.UUID()), expiration, token)
 	conn.Close()
 
 	if err != nil {

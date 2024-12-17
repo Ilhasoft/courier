@@ -14,10 +14,11 @@ import (
 	"strconv"
 	"time"
 
+	"errors"
+
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -148,9 +149,9 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 		// create our date from the timestamp (they give us millis, arg is nanos)
 		date := time.Unix(0, lineEvent.Timestamp*1000000).UTC()
 
-		urn, err := urns.NewURNFromParts(urns.LineScheme, lineEvent.Source.UserID, "", "")
+		urn, err := urns.New(urns.Line, lineEvent.Source.UserID)
 		if err != nil {
-			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid line id"))
 		}
 
 		msg := h.Backend().NewIncomingMsg(channel, urn, text, lineEvent.ReplyToken, clog).WithReceivedOn(date)
@@ -282,22 +283,20 @@ type mtResponse struct {
 	Message string `json:"message"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	authToken := msg.Channel().StringConfigForKey(courier.ConfigAuthToken, "")
 	if authToken == "" {
-		return nil, fmt.Errorf("no auth token set for LN channel: %s", msg.Channel().UUID())
+		return courier.ErrChannelConfig
 	}
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	// all msg parts in JSON
 	var jsonMsgs []string
 	parts := handlers.SplitMsgByChannel(msg.Channel(), msg.Text(), maxMsgLength)
 	qrs := msg.QuickReplies()
 
-	attachments, err := handlers.ResolveAttachments(ctx, h.Backend(), msg.Attachments(), mediaSupport, false)
+	attachments, err := handlers.ResolveAttachments(ctx, h.Backend(), msg.Attachments(), mediaSupport, false, clog)
 	if err != nil {
-		return nil, errors.Wrap(err, "error resolving attachments")
+		return fmt.Errorf("error resolving attachments: %w", err)
 	}
 
 	// fill all msg parts with attachment parts
@@ -319,6 +318,8 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 		if err == nil {
 			jsonMsgs = append(jsonMsgs, string(jsonMsg))
+		} else {
+			return err
 		}
 	}
 
@@ -357,7 +358,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		if batchCount == maxMsgSend || (i == len(jsonMsgs)-1) {
 			req, err := buildSendMsgRequest(authToken, msg.URN().Path(), msg.ResponseToExternalID(), batch)
 			if err != nil {
-				return status, err
+				return err
 			}
 
 			resp, respBody, err := h.RequestHTTP(req, clog)
@@ -371,15 +372,14 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 			respPayload := &mtResponse{}
 			err = json.Unmarshal(respBody, respPayload)
 			if err != nil {
-				clog.Error(courier.ErrorResponseUnparseable("JSON"))
-				return status, nil
+				return courier.ErrResponseUnparseable
 			}
 
 			errMsg := respPayload.Message
 			if errMsg == "Invalid reply token" {
 				req, err = buildSendMsgRequest(authToken, msg.URN().Path(), "", batch)
 				if err != nil {
-					return status, err
+					return err
 				}
 
 				resp, respBody, _ := h.RequestHTTP(req, clog)
@@ -387,22 +387,19 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 				respPayload := &mtResponse{}
 				err = json.Unmarshal(respBody, respPayload)
 				if err != nil {
-					clog.Error(courier.ErrorResponseUnparseable("JSON"))
-					return status, nil
+					return courier.ErrResponseUnparseable
 				}
 
 				if resp.StatusCode/100 != 2 {
-					clog.Error(courier.ErrorExternal(strconv.Itoa(resp.StatusCode), respPayload.Message))
-					return status, nil
+					return courier.ErrFailedWithReason(strconv.Itoa(resp.StatusCode), respPayload.Message)
 				}
 			} else {
-				clog.Error(courier.ErrorExternal(strconv.Itoa(resp.StatusCode), respPayload.Message))
-				return status, err
+				return courier.ErrFailedWithReason(strconv.Itoa(resp.StatusCode), respPayload.Message)
 			}
 		}
 	}
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+
+	return nil
 }
 
 func buildSendMsgRequest(authToken, to string, replyToken string, jsonMsgs []string) (*http.Request, error) {

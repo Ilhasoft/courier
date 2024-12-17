@@ -26,7 +26,7 @@ type handler struct {
 }
 
 func newHandler() courier.ChannelHandler {
-	return &handler{handlers.NewBaseHandler(courier.ChannelType("WWC"), "Weni Web Chat")}
+	return &handler{handlers.NewBaseHandler(courier.ChannelType("WWC"), "Weni Web Chat", nil)}
 }
 
 // Initialize is called by the engine once everything is loaded
