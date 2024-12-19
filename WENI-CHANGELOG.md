@@ -1,3 +1,7 @@
+1.5.10-courier-9.0.1
+----------
+  * Update to v9.2.0
+
 1.5.9-courier-9.0.1
 ----------
   * Update to v9.0.1
