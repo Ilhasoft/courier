@@ -65,5 +65,3 @@ require (
 	gopkg.in/go-playground/assert.v1 v1.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-//replace github.com/nyaruka/gocommon => github.com/Ilhasoft/gocommon v1.42.7-weni
