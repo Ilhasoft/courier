@@ -439,7 +439,7 @@ var whatsappOutgoingTests = []OutgoingTestCase{
 			},
 		},
 		ExpectedRequests: []ExpectedRequest{{
-			Body: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"header","parameters":[{"type":"image","image":{"link":"https://foo.bar/image.jpg"}}]},{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
+			Body: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"header","parameters":[{"type":"image","text":"","image":{"link":"https://foo.bar/image.jpg"}}]},{"type":"body","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
 		}},
 		ExpectedExtIDs: []string{"157b5e14568e8"},
 	},
@@ -490,7 +490,7 @@ var whatsappOutgoingTests = []OutgoingTestCase{
 			},
 		},
 		ExpectedRequests: []ExpectedRequest{{
-			Body: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"header","parameters":[{"type":"image","image":{"link":"https://foo.bar/image.jpg"}}]},{"type":"body","parameters":[{"type":"text","text":"Ryan Lewis"},{"type":"text","text":"niño"}]},{"type":"button","sub_type":"quick_reply","index":"0","parameters":[{"type":"payload","payload":"Sip"}]},{"type":"button","sub_type":"url","index":"1","parameters":[{"type":"text","text":"id00231"}]}]}}`,
+			Body: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"header","parameters":[{"type":"image","text":"","image":{"link":"https://foo.bar/image.jpg"}}]},{"type":"body","parameters":[{"type":"text","text":"Ryan Lewis"},{"type":"text","text":"niño"}]},{"type":"button","sub_type":"quick_reply","index":"0","parameters":[{"type":"payload","text":"","payload":"Sip"}]},{"type":"button","sub_type":"url","index":"1","parameters":[{"type":"text","text":"id00231"}]}]}}`,
 		}},
 		ExpectedExtIDs: []string{"157b5e14568e8"},
 	},
