@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -11,11 +12,9 @@ import (
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c568c", "TG", "2020", "US", map[string]any{"auth_token": "a123"}),
-}
 
 var helloMsg = `{
   "update_id": 174114370,
@@ -772,177 +771,167 @@ func TestIncoming(t *testing.T) {
 	telegramService := buildMockTelegramService(testCases)
 	defer telegramService.Close()
 
-	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c568c", "TG", "2020", "US", []string{urns.Telegram.Prefix}, map[string]any{"auth_token": "a123"}),
+	}
+
+	RunIncomingTestCases(t, chs, newHandler(), testCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	telegramService := buildMockTelegramService(testCases)
-	defer telegramService.Close()
-
-	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
-}
-
-// setSendURL takes care of setting the send_url to our test server host
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	apiURL = s.URL
-}
-
-var defaultSendTestCases = []OutgoingTestCase{
+var outgoingCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message",
-		MsgURN:             "telegram:12345",
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{
-			"text":         "Simple Message",
-			"chat_id":      "12345",
-			"reply_markup": `{"remove_keyboard":true}`,
+		Label:   "Plain Send",
+		MsgText: "Simple Message",
+		MsgURN:  "telegram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "133",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Quick Reply",
-		MsgText:            "Are you happy?",
-		MsgURN:             "telegram:12345",
-		MsgQuickReplies:    []string{"Yes", "No"},
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{
-			"text":         "Are you happy?",
-			"chat_id":      "12345",
-			"reply_markup": `{"keyboard":[[{"text":"Yes"},{"text":"No"}]],"resize_keyboard":true,"one_time_keyboard":true}`,
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"text": {"Simple Message"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "reply_markup": {`{"remove_keyboard":true}`}}},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "133",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"133"},
 	},
 	{
-		Label:              "Quick Reply with multiple attachments",
-		MsgText:            "Are you happy?",
-		MsgURN:             "telegram:12345",
-		MsgQuickReplies:    []string{"Yes", "No"},
-		MsgAttachments:     []string{"application/pdf:https://foo.bar/doc1.pdf", "application/pdf:https://foo.bar/document.pdf"},
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{
-			"chat_id":      "12345",
-			"document":     "https://foo.bar/document.pdf",
-			"reply_markup": `{"keyboard":[[{"text":"Yes"},{"text":"No"}]],"resize_keyboard":true,"one_time_keyboard":true}`,
+		Label:           "Quick Reply",
+		MsgText:         "Are you happy?",
+		MsgURN:          "telegram:12345",
+		MsgQuickReplies: []string{"Yes", "No"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "133",
-		SendPrep:           setSendURL,
-	},
-
-	{
-		Label:              "Unicode Send",
-		MsgText:            "☺",
-		MsgURN:             "telegram:12345",
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{"text": "☺", "chat_id": "12345"},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "133",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Error",
-		MsgText:            "Error",
-		MsgURN:             "telegram:12345",
-		MockResponseBody:   `{ "ok": false, "error_code":400, "description":"Bot domain invalid." }`,
-		MockResponseStatus: 403,
-		ExpectedPostParams: map[string]string{"text": `Error`, "chat_id": "12345"},
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("400", "Bot domain invalid.")},
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Stopped Contact Code",
-		MsgText:            "Stopped Contact",
-		MsgURN:             "telegram:12345",
-		MockResponseBody:   `{ "ok": false, "error_code":403, "description":"Forbidden: bot was blocked by the user"}`,
-		MockResponseStatus: 403,
-		ExpectedPostParams: map[string]string{"text": `Stopped Contact`, "chat_id": "12345"},
-		ExpectedMsgStatus:  "F",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("403", "Forbidden: bot was blocked by the user")},
-		ExpectedStopEvent:  true,
-		SendPrep:           setSendURL,
-	},
-	{
-		Label:              "Should not stop other error",
-		MsgText:            "Simple Message",
-		MsgURN:             "telegram:12345",
-		MockResponseBody:   `{ "ok": true }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{
-			"text":         "Simple Message",
-			"chat_id":      "12345",
-			"reply_markup": `{"remove_keyboard":true}`,
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"text": {"Are you happy?"}, "chat_id": {"12345"}, "parse_mode": {"Markdown"}, "reply_markup": {`{"keyboard":[[{"text":"Yes"},{"text":"No"}]],"resize_keyboard":true,"one_time_keyboard":true}`}}},
 		},
-		ExpectedMsgStatus: "E",
-		SendPrep:          setSendURL,
+		ExpectedExtIDs: []string{"133"},
 	},
 	{
-		Label:              "Send Photo",
-		MsgText:            "My pic!",
-		MsgURN:             "telegram:12345",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{"caption": "My pic!", "chat_id": "12345", "photo": "https://foo.bar/image.jpg"},
-		ExpectedMsgStatus:  "W",
-		SendPrep:           setSendURL,
+		Label:           "Quick Reply with multiple attachments",
+		MsgText:         "Are you happy?",
+		MsgURN:          "telegram:12345",
+		MsgQuickReplies: []string{"Yes", "No"},
+		MsgAttachments:  []string{"application/pdf:https://foo.bar/doc1.pdf", "application/pdf:https://foo.bar/document.pdf"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+			"*/botauth_token/sendDocument": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"text": {"Are you happy?"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+			{Form: url.Values{"caption": []string{""}, "chat_id": {"12345"}, "document": {"https://foo.bar/doc1.pdf"}, "parse_mode": {"Markdown"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+			{Form: url.Values{"caption": []string{""}, "chat_id": {"12345"}, "document": {"https://foo.bar/document.pdf"}, "parse_mode": {"Markdown"}, "reply_markup": {`{"keyboard":[[{"text":"Yes"},{"text":"No"}]],"resize_keyboard":true,"one_time_keyboard":true}`}}},
+		},
+		ExpectedExtIDs: []string{"133", "133", "133"},
 	},
 	{
-		Label:              "Send Video",
-		MsgText:            "My vid!",
-		MsgURN:             "telegram:12345",
-		MsgAttachments:     []string{"video/mpeg:https://foo.bar/video.mpeg"},
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{"caption": "My vid!", "chat_id": "12345", "video": "https://foo.bar/video.mpeg"},
-		ExpectedMsgStatus:  "W",
-		SendPrep:           setSendURL,
+		Label:   "Error",
+		MsgText: "Error",
+		MsgURN:  "telegram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendMessage": {
+				httpx.NewMockResponse(403, nil, []byte(`{ "ok": false, "error_code":400, "description":"Bot domain invalid." }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"text": {"Error"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedError: courier.ErrFailedWithReason("400", "Bot domain invalid."),
 	},
 	{
-		Label:              "Send Audio",
-		MsgText:            "My audio!",
-		MsgURN:             "telegram:12345",
-		MsgAttachments:     []string{"audio/mp3:https://foo.bar/audio.mp3"},
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{"caption": "My audio!", "chat_id": "12345", "audio": "https://foo.bar/audio.mp3"},
-		ExpectedMsgStatus:  "W",
-		SendPrep:           setSendURL,
+		Label:   "Stopped Contact Code",
+		MsgText: "Stopped Contact",
+		MsgURN:  "telegram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendMessage": {
+				httpx.NewMockResponse(403, nil, []byte(`{ "ok": false, "error_code":403, "description":"Forbidden: bot was blocked by the user"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"text": {"Stopped Contact"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedError: courier.ErrContactStopped,
 	},
 	{
-		Label:              "Send Document",
-		MsgText:            "My document!",
-		MsgURN:             "telegram:12345",
-		MsgAttachments:     []string{"application/pdf:https://foo.bar/document.pdf"},
-		MockResponseBody:   `{ "ok": true, "result": { "message_id": 133 } }`,
-		MockResponseStatus: 200,
-		ExpectedPostParams: map[string]string{"caption": "My document!", "chat_id": "12345", "document": "https://foo.bar/document.pdf"},
-		ExpectedMsgStatus:  "W",
-		SendPrep:           setSendURL,
+		Label:          "Send Photo",
+		MsgText:        "My pic!",
+		MsgURN:         "telegram:12345",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendPhoto": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"caption": {"My pic!"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "photo": {"https://foo.bar/image.jpg"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedExtIDs: []string{"133"},
+	},
+	{
+		Label:          "Send Video",
+		MsgText:        "My vid!",
+		MsgURN:         "telegram:12345",
+		MsgAttachments: []string{"video/mpeg:https://foo.bar/video.mpeg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendVideo": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"caption": {"My vid!"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "video": {"https://foo.bar/video.mpeg"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedExtIDs: []string{"133"},
+	},
+	{
+		Label:          "Send Audio",
+		MsgText:        "My audio!",
+		MsgURN:         "telegram:12345",
+		MsgAttachments: []string{"audio/mp3:https://foo.bar/audio.mp3"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendAudio": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"caption": {"My audio!"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "audio": {"https://foo.bar/audio.mp3"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedExtIDs: []string{"133"},
+	},
+	{
+		Label:          "Send Document",
+		MsgText:        "My document!",
+		MsgURN:         "telegram:12345",
+		MsgAttachments: []string{"application/pdf:https://foo.bar/document.pdf"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendDocument": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"caption": {"My document!"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "document": {"https://foo.bar/document.pdf"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedExtIDs: []string{"133"},
 	},
 	{
 		Label:             "Unknown attachment type",
-		MsgText:           "My pic!",
+		MsgText:           "My foo!",
 		MsgURN:            "telegram:12345",
 		MsgAttachments:    []string{"unknown/foo:https://foo.bar/unknown.foo"},
-		ExpectedMsgStatus: "E",
-		ExpectedErrors:    []*courier.ChannelError{courier.ErrorMediaUnsupported("unknown/foo")},
-		SendPrep:          setSendURL,
+		ExpectedLogErrors: []*courier.ChannelError{courier.ErrorMediaUnsupported("unknown/foo")},
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "TG", "2020", "US",
-		map[string]any{courier.ConfigAuthToken: "auth_token"})
+	ch := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "TG", "2020", "US",
+		[]string{urns.Telegram.Prefix},
+		map[string]any{courier.ConfigAuthToken: "auth_token"},
+	)
 
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{"auth_token"}, nil)
+	RunOutgoingTestCases(t, ch, newHandler(), outgoingCases, []string{"auth_token"}, nil)
 }

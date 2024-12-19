@@ -1,7 +1,6 @@
 package africastalking
 
 import (
-	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -9,18 +8,16 @@ import (
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US", nil),
-}
 
 const (
 	receiveURL = "/c/at/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive/"
 	statusURL  = "/c/at/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status/"
 )
 
-var incomingTestCases = []IncomingTestCase{
+var incomingCases = []IncomingTestCase{
 	{
 		Label:                "Receive Valid",
 		URL:                  receiveURL,
@@ -62,7 +59,7 @@ var incomingTestCases = []IncomingTestCase{
 		URL:                  receiveURL,
 		Data:                 "linkId=03090445075804249226&text=Msg&to=21512&id=ec9adc86-51d5-4bc8-8eb0-d8ab0bb53dc3&date=2017-05-03T06%3A04%3A45Z&from=MTN",
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	{
 		Label:                "Invalid Date",
@@ -104,103 +101,110 @@ var incomingTestCases = []IncomingTestCase{
 }
 
 func TestIncoming(t *testing.T) {
-	RunIncomingTestCases(t, testChannels, newHandler(), incomingTestCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US", []string{urns.Phone.Prefix}, nil),
+	}
+
+	RunIncomingTestCases(t, chs, newHandler(), incomingCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	RunChannelBenchmarks(b, testChannels, newHandler(), incomingTestCases)
-}
-
-// setSendURL takes care of setting the sendURL to call
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
-var outgoingTestCases = []OutgoingTestCase{
+var outgoingCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "SMSMessageData": {"Recipients": [{"status": "Success", "messageId": "1002"}] } }`,
-		MockResponseStatus: 200,
-		ExpectedHeaders:    map[string]string{"apikey": "KEY"},
-		ExpectedRequests: []ExpectedRequest{
-			{Form: url.Values{"message": {"Simple Message ☺"}, "username": {"Username"}, "to": {"+250788383383"}, "from": {"2020"}}},
+		Label:   "Plain Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.africastalking.com/version1/messaging": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "SMSMessageData": {"Recipients": [{"status": "Success", "messageId": "1002"}] } }`)),
+			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "1002",
-		SendPrep:           setSendURL,
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Headers: map[string]string{"apikey": "KEY"},
+				Form:    url.Values{"message": {"Simple Message ☺"}, "username": {"Username"}, "to": {"+250788383383"}, "from": {"2020"}},
+			},
+		},
+		ExpectedExtIDs: []string{"1002"},
 	},
 	{
-		Label:              "Send Attachment",
-		MsgText:            "My pic!",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{ "SMSMessageData": {"Recipients": [{"status": "Success", "messageId": "1002"}] } }`,
-		MockResponseStatus: 200,
+		Label:          "Send Attachment",
+		MsgText:        "My pic!",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.africastalking.com/version1/messaging": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "SMSMessageData": {"Recipients": [{"status": "Success", "messageId": "1002"}] } }`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{Form: url.Values{"message": {"My pic!\nhttps://foo.bar/image.jpg"}, "username": {"Username"}, "to": {"+250788383383"}, "from": {"2020"}}},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "1002",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"1002"},
 	},
 	{
-		Label:              "No External Id",
-		MsgText:            "No External ID",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "SMSMessageData": {"Recipients": [{"status": "Failed" }] } }`,
-		MockResponseStatus: 200,
-		ExpectedRequests: []ExpectedRequest{
-			{Form: url.Values{"message": {`No External ID`}, "username": {"Username"}, "to": {"+250788383383"}, "from": {"2020"}}},
+		Label:   "Explicit failed status",
+		MsgText: "Hi",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.africastalking.com/version1/messaging": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "SMSMessageData": {"Recipients": [{"status": "Failed" }] } }`)),
+			},
 		},
-		ExpectedMsgStatus: "E",
-		SendPrep:          setSendURL,
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"message": {`Hi`}, "username": {"Username"}, "to": {"+250788383383"}, "from": {"2020"}}},
+		},
+		ExpectedError: courier.ErrResponseUnexpected,
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "error": "failed" }`,
-		MockResponseStatus: 401,
+		Label:   "Missing status value",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.africastalking.com/version1/messaging": {
+				httpx.NewMockResponse(401, nil, []byte(`{ "error": "failed" }`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{Form: url.Values{"message": {`Error Message`}, "username": {"Username"}, "to": {"+250788383383"}, "from": {"2020"}}},
 		},
-		ExpectedMsgStatus: "E",
-		SendPrep:          setSendURL,
+		ExpectedError: courier.ErrResponseStatus,
 	},
 }
 
-var sharedSendTestCases = []OutgoingTestCase{
+var sharedOutgoingCases = []OutgoingTestCase{
 	{
-		Label:              "Shared Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "SMSMessageData": {"Recipients": [{"status": "Success", "messageId": "1002"}] } }`,
-		MockResponseStatus: 200,
-		ExpectedHeaders:    map[string]string{"apikey": "KEY"},
-		ExpectedRequests: []ExpectedRequest{
-			{Form: url.Values{"message": {"Simple Message ☺"}, "username": {"Username"}, "to": {"+250788383383"}}},
+		Label:   "Shared Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.africastalking.com/version1/messaging": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "SMSMessageData": {"Recipients": [{"status": "Success", "messageId": "1002"}] } }`)),
+			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "1002",
-		SendPrep:           setSendURL,
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Headers: map[string]string{"apikey": "KEY"},
+				Form:    url.Values{"message": {"Simple Message ☺"}, "username": {"Username"}, "to": {"+250788383383"}}},
+		},
+		ExpectedExtIDs: []string{"1002"},
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US",
+	defaultChannel := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US",
+		[]string{urns.Phone.Prefix},
 		map[string]any{
 			courier.ConfigUsername: "Username",
 			courier.ConfigAPIKey:   "KEY",
 		})
-	var sharedChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US",
+	sharedChannel := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US",
+		[]string{urns.Phone.Prefix},
 		map[string]any{
 			courier.ConfigUsername: "Username",
 			courier.ConfigAPIKey:   "KEY",
 			configIsShared:         true,
 		})
 
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), outgoingTestCases, []string{"KEY"}, nil)
-	RunOutgoingTestCases(t, sharedChannel, newHandler(), sharedSendTestCases, []string{"KEY"}, nil)
+	RunOutgoingTestCases(t, defaultChannel, newHandler(), outgoingCases, []string{"KEY"}, nil)
+	RunOutgoingTestCases(t, sharedChannel, newHandler(), sharedOutgoingCases, []string{"KEY"}, nil)
 }

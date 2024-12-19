@@ -3,7 +3,6 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +20,7 @@ import (
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/i18n"
+	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,39 +70,6 @@ type IncomingTestCase struct {
 	ExpectedEvents        []ExpectedEvent
 	ExpectedErrors        []*courier.ChannelError
 	NoLogsExpected        bool
-}
-
-// MockedRequest is a fake HTTP request
-type MockedRequest struct {
-	Method       string
-	Path         string
-	RawQuery     string
-	Body         string
-	BodyContains string
-}
-
-// MockedResponse is a fake HTTP response
-type MockedResponse struct {
-	Status int
-	Body   string
-}
-
-// Tp is utility method to get the pointer to the passed in time
-func Tp(tm time.Time) *time.Time { return &tm }
-
-// utility method to make sure the passed in host is up, prevents races with our test server
-func ensureTestServerUp(host string) {
-	for i := 0; i < 20; i++ {
-		_, err := http.Get(host)
-		if err == nil {
-			break
-		}
-		time.Sleep(time.Microsecond * 100)
-	}
-}
-
-func (m MockedRequest) Matches(r *http.Request, body []byte) bool {
-	return m.Method == r.Method && m.Path == r.URL.Path && m.RawQuery == r.URL.RawQuery && (m.Body == string(body) || (m.BodyContains != "" && strings.Contains(string(body), m.BodyContains)))
 }
 
 // utility method to make a request to a handler URL
@@ -171,7 +138,7 @@ func newServer(backend courier.Backend) courier.Server {
 	logger := slog.Default()
 	log.SetOutput(io.Discard)
 
-	config := courier.NewConfig()
+	config := courier.NewDefaultConfig()
 	config.FacebookWebhookSecret = "fb_webhook_secret"
 	config.FacebookApplicationSecret = "fb_app_secret"
 	config.WhatsappCloudWebhookSecret = "wac_webhook_secret"
@@ -291,11 +258,12 @@ func RunIncomingTestCases(t *testing.T, channels []courier.Channel, handler cour
 type SendPrepFunc func(*httptest.Server, courier.ChannelHandler, courier.Channel, courier.MsgOut)
 
 type ExpectedRequest struct {
-	Headers map[string]string
-	Path    string
-	Params  url.Values
-	Form    url.Values
-	Body    string
+	Headers      map[string]string
+	Path         string
+	Params       url.Values
+	Form         url.Values
+	Body         string
+	BodyContains string
 }
 
 func (e *ExpectedRequest) AssertMatches(t *testing.T, actual *http.Request, requestNum int) {
@@ -318,12 +286,15 @@ func (e *ExpectedRequest) AssertMatches(t *testing.T, actual *http.Request, requ
 		value, _ := io.ReadAll(actual.Body)
 		assert.Equal(t, e.Body, strings.Trim(string(value), "\n"), "body mismatch for request %d", requestNum)
 	}
+	if e.BodyContains != "" {
+		value, _ := io.ReadAll(actual.Body)
+		assert.Contains(t, string(value), e.BodyContains, "body contains fail for request %d", requestNum)
+	}
 }
 
 // OutgoingTestCase defines the test values for a particular test case
 type OutgoingTestCase struct {
-	Label    string
-	SendPrep SendPrepFunc
+	Label string
 
 	MsgText                 string
 	MsgURN                  string
@@ -332,32 +303,54 @@ type OutgoingTestCase struct {
 	MsgQuickReplies         []string
 	MsgLocale               i18n.Locale
 	MsgTopic                string
+	MsgTemplating           string
 	MsgHighPriority         bool
 	MsgResponseToExternalID string
-	MsgMetadata             json.RawMessage
 	MsgFlow                 *courier.FlowReference
 	MsgOptIn                *courier.OptInReference
+	MsgUserID               courier.UserID
 	MsgOrigin               courier.MsgOrigin
 	MsgContactLastSeenOn    *time.Time
 
-	MockResponseStatus int
-	MockResponseBody   string
-	MockResponses      map[MockedRequest]*httpx.MockResponse
+	MockResponses map[string][]*httpx.MockResponse
 
 	ExpectedRequests    []ExpectedRequest
-	ExpectedMsgStatus   courier.MsgStatus
-	ExpectedExternalID  string
-	ExpectedErrors      []*courier.ChannelError
-	ExpectedStopEvent   bool
+	ExpectedExtIDs      []string
+	ExpectedError       error
+	ExpectedLogErrors   []*courier.ChannelError
 	ExpectedContactURNs map[string]bool
 	ExpectedNewURN      string
+}
 
-	// deprecated, use ExpectedRequests
-	ExpectedRequestPath string
-	ExpectedURLParams   map[string]string
-	ExpectedPostParams  map[string]string
-	ExpectedRequestBody string
-	ExpectedHeaders     map[string]string
+// Msg creates the test message for this test case
+func (tc *OutgoingTestCase) Msg(mb *test.MockBackend, ch courier.Channel) courier.MsgOut {
+	msgOrigin := courier.MsgOriginFlow
+	if tc.MsgOrigin != "" {
+		msgOrigin = tc.MsgOrigin
+	}
+
+	m := mb.NewOutgoingMsg(ch, 10, urns.URN(tc.MsgURN), tc.MsgText, tc.MsgHighPriority, tc.MsgQuickReplies, tc.MsgTopic, tc.MsgResponseToExternalID, msgOrigin, tc.MsgContactLastSeenOn).(*test.MockMsg)
+	m.WithLocale(tc.MsgLocale)
+	m.WithUserID(tc.MsgUserID)
+
+	for _, a := range tc.MsgAttachments {
+		m.WithAttachment(a)
+	}
+	if tc.MsgURNAuth != "" {
+		m.WithURNAuth(tc.MsgURNAuth)
+	}
+	if tc.MsgTemplating != "" {
+		templating := &courier.Templating{}
+		jsonx.MustUnmarshal([]byte(tc.MsgTemplating), templating)
+		m.WithTemplating(templating)
+	}
+	if tc.MsgFlow != nil {
+		m.WithFlow(tc.MsgFlow)
+	}
+	if tc.MsgOptIn != nil {
+		m.WithOptIn(tc.MsgOptIn)
+	}
+	return m
 }
 
 // RunOutgoingTestCases runs all the passed in test cases against the channel
@@ -371,112 +364,40 @@ func RunOutgoingTestCases(t *testing.T, channel courier.Channel, handler courier
 	handler.Initialize(s)
 
 	for _, tc := range testCases {
-		mockRRCount := 0
-		msgOrigin := courier.MsgOriginFlow
-		if tc.MsgOrigin != "" {
-			msgOrigin = tc.MsgOrigin
-		}
-
 		mb.Reset()
 
 		t.Run(tc.Label, func(t *testing.T) {
 			require := require.New(t)
 
-			msg := mb.NewOutgoingMsg(channel, 10, urns.URN(tc.MsgURN), tc.MsgText, tc.MsgHighPriority, tc.MsgQuickReplies, tc.MsgTopic, tc.MsgResponseToExternalID, msgOrigin, tc.MsgContactLastSeenOn).(*test.MockMsg)
-			msg.WithLocale(tc.MsgLocale)
+			msg := tc.Msg(mb, channel)
 
-			for _, a := range tc.MsgAttachments {
-				msg.WithAttachment(a)
-			}
-			if tc.MsgURNAuth != "" {
-				msg.WithURNAuth(tc.MsgURNAuth)
-			}
-			if len(tc.MsgMetadata) > 0 {
-				msg.WithMetadata(tc.MsgMetadata)
-			}
-			if tc.MsgFlow != nil {
-				msg.WithFlow(tc.MsgFlow)
-			}
-			if tc.MsgOptIn != nil {
-				msg.WithOptIn(tc.MsgOptIn)
-			}
-
+			var mockHTTP *httpx.MockRequestor
 			actualRequests := make([]*http.Request, 0, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// copy request and add to list
-				body, _ := io.ReadAll(r.Body)
-				copy := httptest.NewRequest(r.Method, r.URL.String(), bytes.NewBuffer(body))
-				copy.Header = r.Header
-				actualRequests = append(actualRequests, copy)
 
-				if (len(tc.MockResponses)) == 0 {
-					w.WriteHeader(tc.MockResponseStatus)
-					w.Write([]byte(tc.MockResponseBody))
-				} else {
-					for mockRequest, mockResponse := range tc.MockResponses {
-						if mockRequest == (MockedRequest{}) || mockRequest.Matches(r, body) {
-							w.WriteHeader(mockResponse.Status)
-							w.Write(mockResponse.Body)
-							mockRRCount++
-							break
-						}
-					}
-				}
-			}))
-			defer server.Close()
-
-			// call our prep function if we have one
-			if tc.SendPrep != nil {
-				tc.SendPrep(server, handler, channel, msg)
+			if len(tc.MockResponses) > 0 {
+				mockHTTP = httpx.NewMockRequestor(tc.MockResponses).Clone()
+				httpx.SetRequestor(mockHTTP)
 			}
 
 			clog := courier.NewChannelLogForSend(msg, handler.RedactValues(channel))
-
 			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
-			status, err := handler.Send(ctx, msg, clog)
-			cancel()
 
-			// sender adds returned error to channel log if there aren't other logged errors
-			if err != nil && len(clog.Errors()) == 0 {
-				clog.RawError(err)
+			res := &courier.SendResult{}
+			serr := handler.Send(ctx, msg, res, clog)
+			externalIDs := res.ExternalIDs()
+			resNewURN := res.GetNewURN()
+
+			if mockHTTP != nil {
+				httpx.SetRequestor(httpx.DefaultRequestor)
+
+				actualRequests = mockHTTP.Requests()
+
+				assert.False(t, mockHTTP.HasUnused(), "unused HTTP mocks")
 			}
 
-			assert.Equal(t, tc.ExpectedErrors, clog.Errors(), "unexpected errors logged")
+			cancel()
 
-			if tc.ExpectedRequestPath != "" || tc.ExpectedURLParams != nil || tc.ExpectedPostParams != nil || tc.ExpectedRequestBody != "" || tc.ExpectedHeaders != nil {
-				testRequest := actualRequests[len(actualRequests)-1]
-
-				if tc.ExpectedRequestPath != "" {
-					require.NotNil(testRequest, "path should not be nil")
-					require.Equal(tc.ExpectedRequestPath, testRequest.URL.Path)
-				}
-				if tc.ExpectedURLParams != nil {
-					require.NotNil(testRequest)
-					for k, v := range tc.ExpectedURLParams {
-						value := testRequest.URL.Query().Get(k)
-						require.Equal(v, value, fmt.Sprintf("%s not equal", k))
-					}
-				}
-				if tc.ExpectedPostParams != nil {
-					require.NotNil(testRequest, "post body should not be nil")
-					for k, v := range tc.ExpectedPostParams {
-						value := testRequest.PostFormValue(k)
-						require.Equal(v, value)
-					}
-				}
-				if tc.ExpectedRequestBody != "" {
-					require.NotNil(testRequest, "request body should not be nil")
-					value, _ := io.ReadAll(testRequest.Body)
-					require.Equal(tc.ExpectedRequestBody, strings.Trim(string(value), "\n"))
-				}
-				if tc.ExpectedHeaders != nil {
-					require.NotNil(testRequest, "headers should not be nil")
-					for k, v := range tc.ExpectedHeaders {
-						value := testRequest.Header.Get(k)
-						require.Equal(v, value)
-					}
-				}
-			} else if len(tc.ExpectedRequests) > 0 {
+			if len(tc.ExpectedRequests) > 0 {
 				assert.Len(t, actualRequests, len(tc.ExpectedRequests), "unexpected number of requests made")
 
 				for i, expectedRequest := range tc.ExpectedRequests {
@@ -487,24 +408,9 @@ func RunOutgoingTestCases(t *testing.T, channel courier.Channel, handler courier
 				}
 			}
 
-			if (len(tc.MockResponses)) != 0 {
-				assert.Equal(t, len(tc.MockResponses), mockRRCount, "mocked request count mismatch")
-			}
-
-			if tc.ExpectedExternalID != "" {
-				require.Equal(tc.ExpectedExternalID, status.ExternalID())
-			}
-
-			if tc.ExpectedMsgStatus != "" {
-				require.NotNil(status, "status should not be nil")
-				require.Equal(tc.ExpectedMsgStatus, status.Status())
-			}
-
-			if tc.ExpectedStopEvent {
-				require.Len(mb.WrittenChannelEvents(), 1)
-				event := mb.WrittenChannelEvents()[0]
-				require.Equal(courier.EventTypeStopContact, event.EventType())
-			}
+			assert.Equal(t, tc.ExpectedExtIDs, externalIDs, "external IDs mismatch")
+			assert.Equal(t, tc.ExpectedError, serr, "send method error mismatch")
+			assert.Equal(t, tc.ExpectedLogErrors, clog.Errors(), "channel log errors mismatch")
 
 			if tc.ExpectedContactURNs != nil {
 				var contactUUID courier.ContactUUID
@@ -523,9 +429,9 @@ func RunOutgoingTestCases(t *testing.T, channel courier.Channel, handler courier
 			}
 
 			if tc.ExpectedNewURN != "" {
-				old, new := status.URNUpdate()
-				require.Equal(urns.URN(tc.MsgURN), old)
-				require.Equal(urns.URN(tc.ExpectedNewURN), new)
+
+				require.Equal(urns.URN(tc.ExpectedNewURN), resNewURN)
+
 			}
 
 			AssertChannelLogRedaction(t, clog, checkRedacted)

@@ -24,7 +24,7 @@ import (
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "JC", "2020", "US", map[string]any{configAppSecret: "secret123", configAppID: "app-id"}),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "JC", "2020", "US", []string{urns.JioChat.Prefix}, map[string]any{configAppSecret: "secret123", configAppID: "app-id"}),
 }
 
 var (
@@ -263,7 +263,7 @@ func newServer(backend courier.Backend) courier.Server {
 	// for benchmarks, log to null
 	logger := slog.Default()
 	log.SetOutput(io.Discard)
-	config := courier.NewConfig()
+	config := courier.NewDefaultConfig()
 	config.DB = "postgres://courier_test:temba@localhost:5432/courier_test?sslmode=disable"
 	config.Redis = "redis://localhost:6379/0"
 	return courier.NewServerWithLogger(config, backend, logger)
@@ -344,65 +344,83 @@ func TestBuildAttachmentRequest(t *testing.T) {
 	AssertChannelLogRedaction(t, clog, []string{"secret123"})
 }
 
-// setSendURL takes care of setting the sendURL to call
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
 var defaultSendTestCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "jiochat:12345",
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
+		Label:   "Plain Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "jiochat:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://channels.jiochat.com/custom/custom_send.action": {
+				httpx.NewMockResponse(200, nil, []byte(``)),
+			},
 		},
-		ExpectedRequestBody: `{"msgtype":"text","touser":"12345","text":{"content":"Simple Message ☺"}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ACCESS_TOKEN",
+			},
+			Body: `{"msgtype":"text","touser":"12345","text":{"content":"Simple Message ☺"}}`,
+		}},
 	},
 	{
-		Label:              "Long Send",
-		MsgText:            "This is a longer message than 160 characters and will cause us to split it into two separate parts, isn't that right but it is even longer than before I say, I need to keep adding more things to make it work",
-		MsgURN:             "jiochat:12345",
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
+		Label:   "Long Send",
+		MsgText: "This is a longer message than 160 characters and will cause us to split it into two separate parts, isn't that right but it is even longer than before I say, I need to keep adding more things to make it work",
+		MsgURN:  "jiochat:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://channels.jiochat.com/custom/custom_send.action": {
+				httpx.NewMockResponse(200, nil, []byte(``)),
+				httpx.NewMockResponse(200, nil, []byte(``)),
+			},
 		},
-		ExpectedRequestBody: `{"msgtype":"text","touser":"12345","text":{"content":"I need to keep adding more things to make it work"}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Headers: map[string]string{
+					"Content-Type":  "application/json",
+					"Accept":        "application/json",
+					"Authorization": "Bearer ACCESS_TOKEN",
+				},
+				Body: `{"msgtype":"text","touser":"12345","text":{"content":"This is a longer message than 160 characters and will cause us to split it into two separate parts, isn't that right but it is even longer than before I say,"}}`,
+			},
+			{
+				Headers: map[string]string{
+					"Content-Type":  "application/json",
+					"Accept":        "application/json",
+					"Authorization": "Bearer ACCESS_TOKEN",
+				},
+				Body: `{"msgtype":"text","touser":"12345","text":{"content":"I need to keep adding more things to make it work"}}`,
+			},
+		},
 	},
 	{
-		Label:              "Send Attachment",
-		MsgText:            "My pic!",
-		MsgURN:             "jiochat:12345",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
+		Label:          "Send Attachment",
+		MsgText:        "My pic!",
+		MsgURN:         "jiochat:12345",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://channels.jiochat.com/custom/custom_send.action": {
+				httpx.NewMockResponse(200, nil, []byte(``)),
+			},
 		},
-		ExpectedRequestBody: `{"msgtype":"text","touser":"12345","text":{"content":"My pic!\nhttps://foo.bar/image.jpg"}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ACCESS_TOKEN",
+			},
+			Body: `{"msgtype":"text","touser":"12345","text":{"content":"My pic!\nhttps://foo.bar/image.jpg"}}`,
+		}},
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "jiochat:12345",
-		MockResponseStatus: 401,
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "jiochat:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://channels.jiochat.com/custom/custom_send.action": {
+				httpx.NewMockResponse(401, nil, []byte(``)),
+			},
+		},
+		ExpectedError: courier.ErrResponseStatus,
 	},
 }
 
@@ -415,7 +433,7 @@ func setupBackend(mb *test.MockBackend) {
 
 func TestOutgoing(t *testing.T) {
 	maxMsgLength = 160
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "JC", "2020", "US", map[string]any{configAppSecret: "secret123", configAppID: "app-id"})
+	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "JC", "2020", "US", []string{urns.JioChat.Prefix}, map[string]any{configAppSecret: "secret123", configAppID: "app-id"})
 
 	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{"secret123"}, setupBackend)
 }

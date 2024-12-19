@@ -15,6 +15,7 @@ import (
 
 	"github.com/buger/jsonparser"
 	"github.com/gomodule/redigo/redis"
+	filetype "github.com/h2non/filetype"
 	"github.com/lib/pq"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/queue"
@@ -22,8 +23,6 @@ import (
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
 	"github.com/nyaruka/null/v3"
-	"github.com/pkg/errors"
-	filetype "gopkg.in/h2non/filetype.v1"
 )
 
 // MsgDirection is the direction of a message
@@ -47,19 +46,20 @@ const (
 
 // Msg is our base struct to represent msgs both in our JSON and db representations
 type Msg struct {
-	OrgID_        OrgID             `json:"org_id"          db:"org_id"`
-	ID_           courier.MsgID     `json:"id"              db:"id"`
-	UUID_         courier.MsgUUID   `json:"uuid"            db:"uuid"`
-	Direction_    MsgDirection      `                       db:"direction"`
-	Status_       courier.MsgStatus `                       db:"status"`
-	Visibility_   MsgVisibility     `                       db:"visibility"`
-	HighPriority_ bool              `json:"high_priority"   db:"high_priority"`
-	Text_         string            `json:"text"            db:"text"`
-	Attachments_  pq.StringArray    `json:"attachments"     db:"attachments"`
-	QuickReplies_ pq.StringArray    `json:"quick_replies"   db:"quick_replies"`
-	Locale_       null.String       `json:"locale"          db:"locale"`
-	ExternalID_   null.String       `                       db:"external_id"`
-	Metadata_     json.RawMessage   `json:"metadata"        db:"metadata"`
+	OrgID_        OrgID               `json:"org_id"          db:"org_id"`
+	ID_           courier.MsgID       `json:"id"              db:"id"`
+	UUID_         courier.MsgUUID     `json:"uuid"            db:"uuid"`
+	Direction_    MsgDirection        `                       db:"direction"`
+	Status_       courier.MsgStatus   `                       db:"status"`
+	Visibility_   MsgVisibility       `                       db:"visibility"`
+	HighPriority_ bool                `json:"high_priority"   db:"high_priority"`
+	Text_         string              `json:"text"            db:"text"`
+	Attachments_  pq.StringArray      `json:"attachments"     db:"attachments"`
+	QuickReplies_ pq.StringArray      `json:"quick_replies"   db:"quick_replies"`
+	Locale_       null.String         `json:"locale"          db:"locale"`
+	Templating_   *courier.Templating `json:"templating"      db:"templating"`
+	ExternalID_   null.String         `                       db:"external_id"`
+	Metadata_     json.RawMessage     `json:"metadata"        db:"metadata"`
 
 	ChannelID_    courier.ChannelID `                       db:"channel_id"`
 	ContactID_    ContactID         `json:"contact_id"      db:"contact_id"`
@@ -72,7 +72,6 @@ type Msg struct {
 	NextAttempt_ time.Time      `                     db:"next_attempt"`
 	CreatedOn_   time.Time      `json:"created_on"    db:"created_on"`
 	ModifiedOn_  time.Time      `                     db:"modified_on"`
-	QueuedOn_    time.Time      `                     db:"queued_on"`
 	SentOn_      *time.Time     `                     db:"sent_on"`
 	LogUUIDs     pq.StringArray `                     db:"log_uuids"`
 
@@ -84,6 +83,7 @@ type Msg struct {
 	IsResend_             bool                    `json:"is_resend"`
 	Flow_                 *courier.FlowReference  `json:"flow"`
 	OptIn_                *courier.OptInReference `json:"optin"`
+	UserID_               courier.UserID          `json:"user_id"`
 	Origin_               courier.MsgOrigin       `json:"origin"`
 	ContactLastSeenOn_    *time.Time              `json:"contact_last_seen_on"`
 
@@ -124,7 +124,6 @@ func newMsg(direction MsgDirection, channel courier.Channel, urn urns.URN, text 
 		NextAttempt_: now,
 		CreatedOn_:   now,
 		ModifiedOn_:  now,
-		QueuedOn_:    now,
 		LogUUIDs:     []string{string(clog.UUID())},
 
 		channel:        dbChannel,
@@ -143,11 +142,12 @@ func (m *Msg) URN() urns.URN            { return m.URN_ }
 func (m *Msg) Channel() courier.Channel { return m.channel }
 
 // outgoing specific
-func (m *Msg) QuickReplies() []string        { return m.QuickReplies_ }
-func (m *Msg) Locale() i18n.Locale           { return i18n.Locale(string(m.Locale_)) }
-func (m *Msg) URNAuth() string               { return m.URNAuth_ }
-func (m *Msg) Origin() courier.MsgOrigin     { return m.Origin_ }
-func (m *Msg) ContactLastSeenOn() *time.Time { return m.ContactLastSeenOn_ }
+func (m *Msg) QuickReplies() []string          { return m.QuickReplies_ }
+func (m *Msg) Locale() i18n.Locale             { return i18n.Locale(string(m.Locale_)) }
+func (m *Msg) Templating() *courier.Templating { return m.Templating_ }
+func (m *Msg) URNAuth() string                 { return m.URNAuth_ }
+func (m *Msg) Origin() courier.MsgOrigin       { return m.Origin_ }
+func (m *Msg) ContactLastSeenOn() *time.Time   { return m.ContactLastSeenOn_ }
 func (m *Msg) Topic() string {
 	if m.Metadata_ == nil {
 		return ""
@@ -163,6 +163,7 @@ func (m *Msg) SentOn() *time.Time             { return m.SentOn_ }
 func (m *Msg) IsResend() bool                 { return m.IsResend_ }
 func (m *Msg) Flow() *courier.FlowReference   { return m.Flow_ }
 func (m *Msg) OptIn() *courier.OptInReference { return m.OptIn_ }
+func (m *Msg) UserID() courier.UserID         { return m.UserID_ }
 func (m *Msg) SessionStatus() string          { return m.SessionStatus_ }
 func (m *Msg) HighPriority() bool             { return m.HighPriority_ }
 
@@ -202,7 +203,7 @@ func writeMsg(ctx context.Context, b *backend, msg courier.MsgIn, clog *courier.
 			attData, err := base64.StdEncoding.DecodeString(attURL[5:])
 			if err != nil {
 				clog.Error(courier.ErrorAttachmentNotDecodable())
-				return errors.Wrap(err, "unable to decode attachment data")
+				return fmt.Errorf("unable to decode attachment data: %w", err)
 			}
 
 			var contentType, extension string
@@ -244,10 +245,10 @@ func writeMsg(ctx context.Context, b *backend, msg courier.MsgIn, clog *courier.
 
 const sqlInsertMsg = `
 INSERT INTO
-	msgs_msg(org_id, uuid, direction, text, attachments, msg_type, msg_count, error_count, high_priority, status,
-             visibility, external_id, channel_id, contact_id, contact_urn_id, created_on, modified_on, next_attempt, queued_on, sent_on, log_uuids)
-    VALUES(:org_id, :uuid, :direction, :text, :attachments, 'T', :msg_count, :error_count, :high_priority, :status,
-           :visibility, :external_id, :channel_id, :contact_id, :contact_urn_id, :created_on, :modified_on, :next_attempt, :queued_on, :sent_on, :log_uuids)
+	msgs_msg(org_id, uuid, direction, text, attachments, msg_type, msg_count, error_count, high_priority, status, is_android,
+             visibility, external_id, channel_id, contact_id, contact_urn_id, created_on, modified_on, next_attempt, sent_on, log_uuids)
+    VALUES(:org_id, :uuid, :direction, :text, :attachments, 'T', :msg_count, :error_count, :high_priority, :status, FALSE,
+           :visibility, :external_id, :channel_id, :contact_id, :contact_urn_id, :created_on, :modified_on, :next_attempt, :sent_on, :log_uuids)
 RETURNING id`
 
 func writeMsgToDB(ctx context.Context, b *backend, m *Msg, clog *courier.ChannelLog) error {
@@ -255,7 +256,7 @@ func writeMsgToDB(ctx context.Context, b *backend, m *Msg, clog *courier.Channel
 
 	// our db is down, write to the spool, we will write/queue this later
 	if err != nil {
-		return errors.Wrap(err, "error getting contact for message")
+		return fmt.Errorf("error getting contact for message: %w", err)
 	}
 
 	// set our contact and urn id
@@ -264,14 +265,14 @@ func writeMsgToDB(ctx context.Context, b *backend, m *Msg, clog *courier.Channel
 
 	rows, err := b.db.NamedQueryContext(ctx, sqlInsertMsg, m)
 	if err != nil {
-		return errors.Wrap(err, "error inserting message")
+		return fmt.Errorf("error inserting message: %w", err)
 	}
 	defer rows.Close()
 
 	rows.Next()
 	err = rows.Scan(&m.ID_)
 	if err != nil {
-		return errors.Wrap(err, "error scanning for inserted message id")
+		return fmt.Errorf("error scanning for inserted message id: %w", err)
 	}
 
 	// queue this up to be handled by RapidPro

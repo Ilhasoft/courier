@@ -1,17 +1,19 @@
 package dmark
 
 import (
-	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "DM", "2020", "RW", nil),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "DM", "2020", "RW", []string{urns.Phone.Prefix}, nil),
 }
 
 const (
@@ -35,7 +37,7 @@ var testCases = []IncomingTestCase{
 		URL:                  receiveURL,
 		Data:                 "text=Msg&short_code=2020&tstamp=2017-10-26T15:51:32.906335%2B00:00&msisdn=MTN",
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	{
 		Label:                "Receive Empty",
@@ -90,51 +92,72 @@ func BenchmarkHandler(b *testing.B) {
 	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
 }
 
-// setSendURL takes care of setting the sendURL to call
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
 var defaultSendTestCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		ExpectedExternalID: "6b1c15d3-cba2-46f7-9a25-78265e58057d",
-		MockResponseBody:   `{ "type": "MT", "sms_id": "6b1c15d3-cba2-46f7-9a25-78265e58057d" }`,
-		MockResponseStatus: 200,
-		ExpectedHeaders:    map[string]string{"Authorization": "Token Authy"},
-		ExpectedPostParams: map[string]string{"text": "Simple Message ☺", "receiver": "250788383383", "sender": "2020", "dlr_url": "https://localhost/c/dk/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status?id=10&status=%s"},
-		ExpectedMsgStatus:  "W",
-		SendPrep:           setSendURL,
+		Label:   "Plain Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi1.dmarkmobile.com/sms/": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "type": "MT", "sms_id": "6b1c15d3-cba2-46f7-9a25-78265e58057d" }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{"Authorization": "Token Authy"},
+			Form: url.Values{
+				"text":     {"Simple Message ☺"},
+				"receiver": {"250788383383"},
+				"sender":   {"2020"},
+				"dlr_url":  {"https://localhost/c/dk/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status?id=10&status=%s"},
+			},
+		}},
+		ExpectedExtIDs: []string{"6b1c15d3-cba2-46f7-9a25-78265e58057d"},
 	},
 	{
-		Label:              "Invalid Body",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "error": "failed" }`,
-		MockResponseStatus: 200,
-		ExpectedHeaders:    map[string]string{"Authorization": "Token Authy"},
-		ExpectedPostParams: map[string]string{"text": "Error Message", "receiver": "250788383383", "sender": "2020"},
-		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("sms_id")},
-		SendPrep:           setSendURL,
+		Label:   "Invalid Body",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi1.dmarkmobile.com/sms/": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "error": "failed" }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{"Authorization": "Token Authy"},
+			Form: url.Values{
+				"text":     {"Error Message"},
+				"receiver": {"250788383383"},
+				"sender":   {"2020"},
+				"dlr_url":  {"https://localhost/c/dk/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status?id=10&status=%s"},
+			},
+		}},
+		ExpectedError: courier.ErrResponseUnexpected,
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "error": "failed" }`,
-		MockResponseStatus: 401,
-		ExpectedHeaders:    map[string]string{"Authorization": "Token Authy"},
-		ExpectedPostParams: map[string]string{"text": "Error Message", "receiver": "250788383383", "sender": "2020"},
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi1.dmarkmobile.com/sms/": {
+				httpx.NewMockResponse(401, nil, []byte(`{ "error": "failed" }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{"Authorization": "Token Authy"},
+			Form: url.Values{
+				"text":     {"Error Message"},
+				"receiver": {"250788383383"},
+				"sender":   {"2020"},
+				"dlr_url":  {"https://localhost/c/dk/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status?id=10&status=%s"},
+			},
+		}},
+		ExpectedError: courier.ErrResponseStatus,
 	},
 }
 
 func TestOutgoing(t *testing.T) {
 	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "AT", "2020", "US",
+		[]string{urns.Phone.Prefix},
 		map[string]any{
 			courier.ConfigAuthToken: "Authy",
 		})

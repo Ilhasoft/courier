@@ -11,6 +11,7 @@ import (
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -92,7 +93,7 @@ func (h *handler) receiveMessage(ctx context.Context, c courier.Channel, w http.
 			return nil, handlers.WriteAndLogRequestError(ctx, h, c, w, r, fmt.Errorf("invalid 'senderAddress' parameter"))
 		}
 
-		urn, err := handlers.StrictTelForCountry(glMsg.SenderAddress[4:], c.Country())
+		urn, err := urns.ParsePhone(glMsg.SenderAddress[4:], c.Country(), true, false)
 		if err != nil {
 			return nil, handlers.WriteAndLogRequestError(ctx, h, c, w, r, err)
 		}
@@ -119,24 +120,15 @@ type mtPayload struct {
 	AppSecret  string `json:"app_secret"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	appID := msg.Channel().StringConfigForKey(configAppID, "")
-	if appID == "" {
-		return nil, fmt.Errorf("Missing 'app_id' config for GL channel")
-	}
-
 	appSecret := msg.Channel().StringConfigForKey(configAppSecret, "")
-	if appSecret == "" {
-		return nil, fmt.Errorf("Missing 'app_secret' config for GL channel")
-	}
-
 	passphrase := msg.Channel().StringConfigForKey(configPassphrase, "")
-	if passphrase == "" {
-		return nil, fmt.Errorf("Missing 'passphrase' config for GL channel")
+
+	if appID == "" || appSecret == "" || passphrase == "" {
+		return courier.ErrChannelConfig
 	}
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 	parts := handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
 	for _, part := range parts {
 		payload := &mtPayload{}
@@ -152,18 +144,17 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		// build our request
 		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf(sendURL, msg.Channel().Address()), requestBody)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 
 		resp, _, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
-
-		status.SetStatus(courier.MsgStatusWired)
 	}
-
-	return status, nil
+	return nil
 }

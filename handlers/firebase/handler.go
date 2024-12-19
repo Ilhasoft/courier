@@ -70,7 +70,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our URN
-	urn, err := urns.NewFirebaseURN(form.From)
+	urn, err := urns.New(urns.Firebase, form.From)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -103,7 +103,7 @@ func (h *handler) registerContact(ctx context.Context, channel courier.Channel, 
 	}
 
 	// create our URN
-	urn, err := urns.NewFirebaseURN(form.URN)
+	urn, err := urns.New(urns.Firebase, form.URN)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -140,27 +140,20 @@ type mtNotification struct {
 	Body  string `json:"body"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	title := msg.Channel().StringConfigForKey(configTitle, "")
-	if title == "" {
-		return nil, fmt.Errorf("no FCM_TITLE set for FCM channel")
-	}
-
 	fcmKey := msg.Channel().StringConfigForKey(configKey, "")
-	if fcmKey == "" {
-		return nil, fmt.Errorf("no FCM_KEY set for FCM channel")
+	if title == "" || fcmKey == "" {
+		return courier.ErrChannelConfig
 	}
 
 	configNotification := msg.Channel().ConfigForKey(configNotification, false)
 	notification, _ := configNotification.(bool)
-
 	msgParts := make([]string, 0)
 	if msg.Text() != "" {
 		msgParts = handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
 	}
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 	for i, part := range msgParts {
 		payload := mtPayload{}
 
@@ -190,7 +183,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 		req, err := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(jsonPayload))
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -198,28 +191,25 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		req.Header.Set("Authorization", fmt.Sprintf("key=%s", fcmKey))
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
 		// was this successful
 		success, _ := jsonparser.GetInt(respBody, "success")
 		if success != 1 {
-			clog.Error(courier.ErrorResponseValueUnexpected("success", "1"))
-			return status, nil
+			return courier.ErrResponseUnexpected
 		}
 
-		// grab the id if this is our first part
-		if i == 0 {
-			externalID, err := jsonparser.GetInt(respBody, "multicast_id")
-			if err != nil {
-				clog.Error(courier.ErrorResponseValueMissing("multicast_id"))
-				return status, nil
-			}
-			status.SetExternalID(fmt.Sprintf("%d", externalID))
+		externalID, err := jsonparser.GetInt(respBody, "multicast_id")
+		if err != nil {
+			return courier.ErrResponseUnexpected
 		}
+		res.AddExternalID(fmt.Sprintf("%d", externalID))
+
 	}
 
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	return nil
 }

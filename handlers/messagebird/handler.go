@@ -125,7 +125,7 @@ func (h *handler) receiveStatus(ctx context.Context, channel courier.Channel, w 
 	}
 
 	if receivedStatus.StatusErrorCode == errorStopped {
-		urn, err := urns.NewTelURNForCountry(receivedStatus.Recipient, "")
+		urn, err := urns.ParsePhone(receivedStatus.Recipient, "", true, false)
 		if err != nil {
 			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 		}
@@ -165,7 +165,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(payload.Originator, channel.Country())
+	urn, err := urns.ParsePhone(payload.Originator, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -184,16 +184,13 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
 }
 
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
-
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	authToken := msg.Channel().StringConfigForKey(courier.ConfigAuthToken, "")
 	if authToken == "" {
-		return nil, fmt.Errorf("missing config 'auth_token' for Messagebird channel")
+		return courier.ErrChannelConfig
 	}
 
 	user := msg.URN().Path()
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
-
 	// create base payload
 	payload := &Message{
 		Recipients: []string{user},
@@ -219,9 +216,8 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	jsonBody := jsonx.MustMarshal(payload)
 
 	req, err := http.NewRequest(http.MethodPost, sendUrl, bytes.NewReader(jsonBody))
-
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -229,18 +225,20 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	req.Header.Set("Authorization", bearer)
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
-	status.SetStatus(courier.MsgStatusWired)
 
 	externalID, err := jsonparser.GetString(respBody, "id")
 	if err != nil {
-		clog.Error(courier.ErrorResponseUnparseable("JSON"))
-		return status, nil
+		clog.Error(courier.ErrorResponseValueMissing("id"))
+	} else {
+		res.AddExternalID(externalID)
 	}
-	status.SetExternalID(externalID)
-	return status, nil
+
+	return nil
 }
 
 func verifyToken(tokenString string, secret string) (jwt.MapClaims, error) {

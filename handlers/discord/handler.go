@@ -14,7 +14,6 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -72,7 +71,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	// parse our form
 	err = r.ParseForm()
 	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.Wrapf(err, "invalid request"))
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("invalid request: %w", err))
 	}
 
 	from = getFormField(r.Form, "from")
@@ -90,7 +89,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	date := time.Now()
 
 	// create our URN
-	urn, err := urns.NewURNFromParts(urns.DiscordScheme, from, "", "")
+	urn, err := urns.New(urns.Discord, from)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -142,19 +141,15 @@ func (h *handler) receiveStatus(ctx context.Context, statusString string, channe
 	return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
+
 	sendURL := msg.Channel().StringConfigForKey(courier.ConfigSendURL, "")
 	if sendURL == "" {
-		return nil, fmt.Errorf("no send url set for DS channel")
+		return courier.ErrChannelConfig
 	}
 
-	// figure out what encoding to tell kannel to send as
 	sendMethod := http.MethodPost
-	// sendBody := msg.Channel().StringConfigForKey(courier.ConfigSendBody, "")
 	contentTypeHeader := jsonMimeTypeType
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 	attachmentURLs := []string{}
 	for _, attachment := range msg.Attachments() {
 		_, attachmentURL := handlers.SplitAttachment(attachment)
@@ -182,13 +177,13 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	var body io.Reader
 	marshalled, err := json.Marshal(ourMessage)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	body = bytes.NewReader(marshalled)
 
 	req, err := http.NewRequest(sendMethod, sendURL, body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", contentTypeHeader)
 
@@ -198,12 +193,11 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	}
 
 	resp, _, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
-	// If we don't have an error, set the message as wired and move on
-	status.SetStatus(courier.MsgStatusWired)
-
-	return status, nil
+	return nil
 }

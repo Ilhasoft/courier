@@ -3,6 +3,7 @@ package zenvia
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -92,9 +93,9 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our URN
-	urn, err := urns.NewWhatsAppURN(payload.Message.From)
+	urn, err := urns.New(urns.WhatsApp, payload.Message.From)
 	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid whatsapp id"))
 	}
 
 	contactName := payload.Visitor.Name
@@ -134,7 +135,7 @@ var statusMapping = map[string]courier.MsgStatus{
 	"NOT_DELIVERED": courier.MsgStatusFailed,
 	"SENT":          courier.MsgStatusSent,
 	"DELIVERED":     courier.MsgStatusDelivered,
-	"READ":          courier.MsgStatusDelivered,
+	"READ":          courier.MsgStatusRead,
 }
 
 type statusPayload struct {
@@ -178,22 +179,17 @@ type mtPayload struct {
 	Contents []mtContent `json:"contents"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	channel := msg.Channel()
-
 	token := channel.StringConfigForKey(courier.ConfigAPIKey, "")
 	if token == "" {
-		return nil, fmt.Errorf("no token set for ZVW channel")
+		return courier.ErrChannelConfig
 	}
 
 	payload := mtPayload{
 		From: strings.TrimLeft(channel.Address(), "+"),
 		To:   strings.TrimLeft(msg.URN().Path(), "+"),
 	}
-
-	status := h.Backend().NewStatusUpdate(channel, msg.ID(), courier.MsgStatusErrored, clog)
-
 	text := ""
 	if channel.ChannelType() == "ZVW" {
 		for _, attachment := range msg.Attachments() {
@@ -230,26 +226,24 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	}
 
 	req, err := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(jsonBody))
-
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-API-TOKEN", token)
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	externalID, err := jsonparser.GetString(respBody, "id")
 	if err != nil {
-		clog.Error(courier.ErrorResponseValueMissing("id"))
-		return status, nil
+		return courier.ErrResponseUnexpected
 	}
-
-	status.SetExternalID(externalID)
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	res.AddExternalID(externalID)
+	return nil
 }

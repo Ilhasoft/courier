@@ -12,6 +12,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/dates"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -51,7 +52,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(form.Mobile, channel.Country())
+	urn, err := urns.ParsePhone(form.Mobile, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -64,30 +65,18 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for TS channel")
-	}
-
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return nil, fmt.Errorf("no password set for TS channel")
-	}
-
 	privateKey := msg.Channel().StringConfigForKey(courier.ConfigSecret, "")
-	if privateKey == "" {
-		return nil, fmt.Errorf("no private key set for TS channel")
+	if username == "" || password == "" || privateKey == "" {
+		return courier.ErrChannelConfig
 	}
-
 	tsSendURL := msg.Channel().StringConfigForKey(courier.ConfigSendURL, sendURL)
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	for _, part := range handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength) {
 		from := strings.TrimPrefix(msg.Channel().Address(), "+")
-		to := fmt.Sprintf("0%s", strings.TrimPrefix(msg.URN().Localize(msg.Channel().Country()).Path(), "0"))
+		to := fmt.Sprintf("0%s", urns.ToLocalPhone(msg.URN(), msg.Channel().Country()))
 
 		// build our request
 		form := url.Values{
@@ -110,21 +99,22 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 		req, err := http.NewRequest(http.MethodGet, tsSendURL, nil)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
-		if strings.Contains(string(respBody), "Success") {
-			status.SetStatus(courier.MsgStatusWired)
-		} else {
-			clog.RawError(fmt.Errorf("Received invalid response content: %s", string(respBody)))
+		if !strings.Contains(string(respBody), "Success") {
+			clog.Error(courier.NewChannelError("", "", "Received invalid response content: %s", string(respBody)))
+			return courier.ErrResponseUnexpected
 		}
 	}
-	return status, nil
 
+	return nil
 }

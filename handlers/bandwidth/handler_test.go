@@ -2,20 +2,15 @@ package bandwidth
 
 import (
 	"context"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 	"github.com/stretchr/testify/assert"
 )
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BW", "2020", "US",
-		map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1", configAccountID: "accound-id", configApplicationID: "application-id"}),
-}
 
 const (
 	receiveURL = "/c/bw/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive/"
@@ -179,7 +174,7 @@ var invalidStatus = `[
     }
 ]`
 
-var testCases = []IncomingTestCase{
+var incomingCases = []IncomingTestCase{
 	{
 		Label:                "Receive Valid",
 		URL:                  receiveURL,
@@ -195,7 +190,7 @@ var testCases = []IncomingTestCase{
 		URL:                  receiveURL,
 		Data:                 invalidURN,
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	{
 		Label:                "Invalid URN",
@@ -239,25 +234,26 @@ var testCases = []IncomingTestCase{
 }
 
 func TestIncoming(t *testing.T) {
-	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BW", "2020", "US",
+			[]string{urns.Phone.Prefix},
+			map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1", configAccountID: "accound-id", configApplicationID: "application-id"},
+		),
+	}
+
+	RunIncomingTestCases(t, chs, newHandler(), incomingCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
-}
-
-// setSendURL takes care of setting the send_url to our test server host
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL + "?%s"
-}
-
-var defaultSendTestCases = []OutgoingTestCase{
+var outgoingCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+12067791234",
-		MockResponseBody:   `{"id": "55555"}`,
-		MockResponseStatus: 200,
+		Label:   "Plain send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+12067791234",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://messaging.bandwidth.com/api/v2/users/accound-id/messages": {
+				httpx.NewMockResponse(200, nil, []byte(`{"id": "55555"}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Headers: map[string]string{
@@ -268,17 +264,18 @@ var defaultSendTestCases = []OutgoingTestCase{
 				Body: `{"applicationId":"application-id","to":["+12067791234"],"from":"2020","text":"Simple Message ☺"}`,
 			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "55555",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"55555"},
 	},
 	{
-		Label:              "Send Attachment",
-		MsgText:            "My pic!",
-		MsgURN:             "tel:+12067791234",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{"id": "55555"}`,
-		MockResponseStatus: 200,
+		Label:          "Attachment",
+		MsgText:        "My pic!",
+		MsgURN:         "tel:+12067791234",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://messaging.bandwidth.com/api/v2/users/accound-id/messages": {
+				httpx.NewMockResponse(200, nil, []byte(`{"id": "55555"}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Headers: map[string]string{
@@ -289,17 +286,18 @@ var defaultSendTestCases = []OutgoingTestCase{
 				Body: `{"applicationId":"application-id","to":["+12067791234"],"from":"2020","text":"My pic!","media":["https://foo.bar/image.jpg"]}`,
 			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "55555",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"55555"},
 	},
 	{
-		Label:              "Send Attachment no text",
-		MsgText:            "",
-		MsgURN:             "tel:+12067791234",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{"id": "55555"}`,
-		MockResponseStatus: 200,
+		Label:          "Send Attachment no text",
+		MsgText:        "",
+		MsgURN:         "tel:+12067791234",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://messaging.bandwidth.com/api/v2/users/accound-id/messages": {
+				httpx.NewMockResponse(200, nil, []byte(`{"id": "55555"}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Headers: map[string]string{
@@ -310,16 +308,17 @@ var defaultSendTestCases = []OutgoingTestCase{
 				Body: `{"applicationId":"application-id","to":["+12067791234"],"from":"2020","text":"","media":["https://foo.bar/image.jpg"]}`,
 			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "55555",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"55555"},
 	},
 	{
-		Label:              "No External ID",
-		MsgText:            "No External ID",
-		MsgURN:             "tel:+12067791234",
-		MockResponseBody:   `{}`,
-		MockResponseStatus: 200,
+		Label:   "No External ID",
+		MsgText: "No External ID",
+		MsgURN:  "tel:+12067791234",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://messaging.bandwidth.com/api/v2/users/accound-id/messages": {
+				httpx.NewMockResponse(200, nil, []byte(`{}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Headers: map[string]string{
@@ -330,16 +329,16 @@ var defaultSendTestCases = []OutgoingTestCase{
 				Body: `{"applicationId":"application-id","to":["+12067791234"],"from":"2020","text":"No External ID"}`,
 			},
 		},
-		ExpectedMsgStatus: "W",
-		ExpectedErrors:    []*courier.ChannelError{courier.ErrorResponseValueMissing("id")},
-		SendPrep:          setSendURL,
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+12067791234",
-		MockResponseBody:   `{ "type": "request-validation", "description": "Your request could not be accepted" }`,
-		MockResponseStatus: 401,
+		Label:   "Error sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+12067791234",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://messaging.bandwidth.com/api/v2/users/accound-id/messages": {
+				httpx.NewMockResponse(401, nil, []byte(`{ "type": "request-validation", "description": "Your request could not be accepted" }`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Headers: map[string]string{
@@ -350,24 +349,28 @@ var defaultSendTestCases = []OutgoingTestCase{
 				Body: `{"applicationId":"application-id","to":["+12067791234"],"from":"2020","text":"Error Message"}`,
 			},
 		},
-		ExpectedMsgStatus: "E",
-		ExpectedErrors:    []*courier.ChannelError{courier.ErrorExternal("request-validation", "Your request could not be accepted")},
-		SendPrep:          setSendURL,
+		ExpectedError: courier.ErrFailedWithReason("request-validation", "Your request could not be accepted"),
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BW", "2020", "US",
-		map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1", configAccountID: "accound-id", configApplicationID: "application-id"})
+	ch := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BW", "2020", "US",
+		[]string{urns.Phone.Prefix},
+		map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1", configAccountID: "accound-id", configApplicationID: "application-id"},
+	)
 
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{httpx.BasicAuth("user1", "pass1")}, nil)
+	RunOutgoingTestCases(t, ch, newHandler(), outgoingCases, []string{httpx.BasicAuth("user1", "pass1")}, nil)
 }
 
 func TestBuildAttachmentRequest(t *testing.T) {
 	mb := test.NewMockBackend()
+	ch := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BW", "2020", "US",
+		[]string{urns.Phone.Prefix},
+		map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1", configAccountID: "accound-id", configApplicationID: "application-id"},
+	)
 
 	bwHandler := &handler{NewBaseHandler(courier.ChannelType("BW"), "Bandwidth")}
-	req, _ := bwHandler.BuildAttachmentRequest(context.Background(), mb, testChannels[0], "https://example.org/v1/media/41", nil)
+	req, _ := bwHandler.BuildAttachmentRequest(context.Background(), mb, ch, "https://example.org/v1/media/41", nil)
 	assert.Equal(t, "https://example.org/v1/media/41", req.URL.String())
 	assert.Equal(t, "Basic dXNlcjE6cGFzczE=", req.Header.Get("Authorization"))
 }

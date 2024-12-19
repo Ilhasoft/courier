@@ -2,7 +2,6 @@ package weniwebchat
 
 import (
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,12 +9,14 @@ import (
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 const channelUUID = "8eb23e93-5ecb-45ba-b726-3b064e0c568c"
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel(channelUUID, "WWC", "250788383383", "", map[string]interface{}{}),
+	test.NewMockChannel(channelUUID, "WWC", "250788383383", "", []string{}, map[string]any{}),
 }
 
 // ReceiveMsg test
@@ -166,90 +167,76 @@ func mockAttachmentURLs(mediaServer *httptest.Server, testCases []OutgoingTestCa
 
 var sendTestCases = []OutgoingTestCase{
 	{
-		Label:               "Plain Send",
-		MsgText:             "Simple Message",
-		MsgURN:              "ext:371298371241",
-		ExpectedMsgStatus:   courier.MsgStatusSent,
-		ExpectedRequestPath: "/send",
-		ExpectedHeaders:     map[string]string{"Content-type": "application/json"},
-		ExpectedRequestBody: `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"Simple Message"}}`,
-		MockResponseStatus:  200,
-		SendPrep:            setSendURL,
-	},
-	{
-		Label:               "Unicode Send",
-		MsgText:             "☺",
-		MsgURN:              "ext:371298371241",
-		ExpectedMsgStatus:   courier.MsgStatusSent,
-		ExpectedRequestPath: "/send",
-		ExpectedHeaders:     map[string]string{"Content-type": "application/json"},
-		ExpectedRequestBody: `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"☺"}}`,
-		MockResponseStatus:  200,
-		SendPrep:            setSendURL,
-	},
-	{
-		Label:               "invalid Text Send",
-		MsgText:             "Error",
-		MsgURN:              "ext:371298371241",
-		ExpectedMsgStatus:   courier.MsgStatusFailed,
-		ExpectedRequestPath: "/send",
-		ExpectedHeaders:     map[string]string{"Content-type": "application/json"},
-		ExpectedRequestBody: `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"Error"}}`,
-		SendPrep:            setSendURL,
-	},
-	{
-		Label:   "Medias Send",
-		MsgText: "Medias",
-		MsgAttachments: []string{
-			"audio/mp3:https://foo.bar/audio.mp3",
-			"application/pdf:https://foo.bar/file.pdf",
-			"image/jpg:https://foo.bar/image.jpg",
-			"video/mp4:https://foo.bar/video.mp4",
+		Label:   "Plain Send",
+		MsgText: "Simple Message",
+		MsgURN:  "ext:371298371241",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/send": {
+				httpx.NewMockResponse(200, nil, []byte(``)),
+			},
 		},
-		MsgURN:             "ext:371298371241",
-		ExpectedMsgStatus:  courier.MsgStatusSent,
-		MockResponseStatus: 200,
-		SendPrep:           setSendURL,
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Body:    `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"Simple Message"}}`,
+				Headers: map[string]string{"Content-type": "application/json"},
+			},
+		},
 	},
 	{
-		Label:              "Invalid Media Type Send",
-		MsgText:            "Medias",
-		MsgAttachments:     []string{"foo/bar:https://foo.bar/foo.bar"},
-		MsgURN:             "ext:371298371241",
-		ExpectedMsgStatus:  courier.MsgStatusFailed,
-		MockResponseStatus: 400,
-		SendPrep:           setSendURL,
+		Label:   "Unicode Send",
+		MsgText: "☺",
+		MsgURN:  "ext:371298371241",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/send": {
+				httpx.NewMockResponse(200, nil, []byte(``)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Body:    `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"☺"}}`,
+				Headers: map[string]string{"Content-type": "application/json"},
+			},
+		},
 	},
 	{
-		Label:             "Invalid Media Send",
-		MsgText:           "Medias",
-		MsgAttachments:    []string{"image/png:https://foo.bar/image.png"},
-		MsgURN:            "ext:371298371241",
-		ExpectedMsgStatus: courier.MsgStatusFailed,
-		SendPrep:          setSendURL,
+		Label:   "invalid Text Send",
+		MsgText: "Error",
+		MsgURN:  "ext:371298371241",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/send": {
+				httpx.NewMockResponse(400, nil, []byte(``)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Body:    `{"type":"message","to":"371298371241","from":"250788383383","message":{"type":"text","timestamp":"1616700878","text":"Error"}}`,
+				Headers: map[string]string{"Content-type": "application/json"},
+			},
+		},
 	},
 	{
-		Label:              "No Timestamp Prepare",
-		MsgText:            "No prepare",
-		MsgURN:             "ext:371298371241",
-		ExpectedMsgStatus:  courier.MsgStatusSent,
-		MockResponseStatus: 200,
-		SendPrep: func(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-			c.(*test.MockChannel).SetConfig(courier.ConfigBaseURL, s.URL)
-			timestamp = ""
+		Label:   "No Timestamp Prepare",
+		MsgText: "No prepare",
+		MsgURN:  "ext:371298371241",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/send": {
+				httpx.NewMockResponse(200, nil, []byte(``)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Body: ``,
+			},
 		},
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	mediaServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
-		defer req.Body.Close()
-		res.WriteHeader(200)
+	var defaultChannel = []courier.Channel{
+		test.NewMockChannel(channelUUID, "WWC", "250788383383", "", []string{urns.External.Prefix}, map[string]any{courier.ConfigBaseURL: "https://foo.bar"}),
+	}
 
-		res.Write([]byte("media bytes"))
-	}))
-	mockedSendTestCases := mockAttachmentURLs(mediaServer, sendTestCases)
-	mediaServer.Close()
+	timestamp = "1616700878"
 
-	RunOutgoingTestCases(t, testChannels[0], newHandler(), mockedSendTestCases, nil, nil)
+	RunOutgoingTestCases(t, defaultChannel[0], newHandler(), sendTestCases, nil, nil)
 }

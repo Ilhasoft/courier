@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -16,9 +17,9 @@ import (
 	"github.com/buger/jsonparser"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
+	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -232,7 +233,7 @@ func (h *handler) verifyServer(channel courier.Channel, w http.ResponseWriter) (
 // receiveMessage handles new message event
 func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moNewMessagePayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	userId := payload.Object.Message.UserId
-	urn, err := urns.NewURNFromParts(urns.VKScheme, strconv.FormatInt(userId, 10), "", "")
+	urn, err := urns.New(urns.VK, strconv.FormatInt(userId, 10))
 
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
@@ -373,9 +374,7 @@ func takeFirstAttachmentUrl(payload moNewMessagePayload) string {
 	return ""
 }
 
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
-
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	params := buildApiBaseParams(msg.Channel())
 	params.Set(paramUserId, msg.URN().Path())
 	params.Set(paramRandomId, msg.ID().String())
@@ -393,25 +392,26 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	req, err := http.NewRequest(http.MethodPost, apiBaseURL+actionSendMessage, nil)
 	if err != nil {
-		return status, errors.New("Cannot create send message request")
+		return errors.New("Cannot create send message request")
 	}
 
 	req.URL.RawQuery = params.Encode()
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	externalMsgId, err := jsonparser.GetInt(respBody, responseOutgoingMessageKey)
-
 	if err != nil {
-		return status, errors.Errorf("no '%s' value in response", responseOutgoingMessageKey)
+		return courier.ErrResponseUnexpected
 	}
-	status.SetExternalID(strconv.FormatInt(externalMsgId, 10))
-	status.SetStatus(courier.MsgStatusSent)
 
-	return status, nil
+	res.AddExternalID(strconv.FormatInt(externalMsgId, 10))
+
+	return nil
 }
 
 // builds msg text with attachment links (if needed) and attachments list param, also returns the errors that occurred
@@ -519,7 +519,8 @@ func (h *handler) downloadMedia(mediaURL string) (io.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	if res, err := h.Backend().HttpClient(true).Do(req); err == nil {
+
+	if res, err := httpx.Do(h.Backend().HttpClient(true), req, nil, nil); err == nil {
 		return res.Body, nil
 	} else {
 		return nil, err

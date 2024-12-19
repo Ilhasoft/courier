@@ -2,12 +2,133 @@ package courier
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/nyaruka/gocommon/analytics"
+	"github.com/nyaruka/gocommon/urns"
 )
+
+type SendResult struct {
+	externalIDs []string
+	newURN      urns.URN
+}
+
+func (r *SendResult) AddExternalID(id string) {
+	r.externalIDs = append(r.externalIDs, id)
+}
+
+func (r *SendResult) ExternalIDs() []string {
+	return r.externalIDs
+}
+
+func (r *SendResult) SetNewURN(u urns.URN) {
+	r.newURN = u
+}
+
+func (r *SendResult) GetNewURN() urns.URN {
+	return r.newURN
+
+}
+
+type SendError struct {
+	msg       string
+	retryable bool
+	loggable  bool
+
+	clogCode    string
+	clogMsg     string
+	clogExtCode string
+}
+
+func (e *SendError) Error() string {
+	return e.msg
+}
+
+// ErrChannelConfig should be returned by a handler send method when channel config is invalid
+var ErrChannelConfig error = &SendError{
+	msg:       "channel config invalid",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "channel_config",
+	clogMsg:   "Channel configuration is missing required values.",
+}
+
+// ErrMessageInvalid should be returned by a handler send method when the message it has received is invalid
+var ErrMessageInvalid error = &SendError{
+	msg:       "message invalid",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "message_invalid",
+	clogMsg:   "Message is missing required values.",
+}
+
+// ErrConnectionFailed should be returned when connection to the channel fails (timeout or 5XX response)
+var ErrConnectionFailed error = &SendError{
+	msg:       "channel connection failed",
+	retryable: true,
+	loggable:  false,
+	clogCode:  "connection_failed",
+	clogMsg:   "Connection to server failed.",
+}
+
+// ErrConnectionThrottled should be returned when channel tells us we're rate limited
+var ErrConnectionThrottled error = &SendError{
+	msg:       "channel rate limited",
+	retryable: true,
+	loggable:  false,
+	clogCode:  "connection_throttled",
+	clogMsg:   "Connection to server has been rate limited.",
+}
+
+// ErrResponseStatus should be returned when channel the response has a non-success status code
+var ErrResponseStatus error = &SendError{
+	msg:       "response status code",
+	retryable: false,
+	loggable:  false,
+	clogCode:  "response_status",
+	clogMsg:   "Response has non-success status code.",
+}
+
+// ErrResponseUnparseable should be returned when channel response can't be parsed in expected format
+var ErrResponseUnparseable error = &SendError{
+	msg:       "response couldn't be parsed",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "response_unparseable",
+	clogMsg:   "Response could not be parsed in the expected format.",
+}
+
+// ErrResponseUnexpected should be returned when channel response doesn't match what we expect
+var ErrResponseUnexpected error = &SendError{
+	msg:       "response not expected values",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "response_unexpected",
+	clogMsg:   "Response doesn't match expected values.",
+}
+
+// ErrContactStopped should be returned when channel tells us explicitly that the contact has opted-out
+var ErrContactStopped error = &SendError{
+	msg:       "contact opted out",
+	retryable: false,
+	loggable:  false,
+	clogCode:  "contact_stopped",
+	clogMsg:   "Contact has opted-out of messages from this channel.",
+}
+
+func ErrFailedWithReason(code, desc string) *SendError {
+	return &SendError{
+		msg:         "channel rejected send with reason",
+		retryable:   false,
+		loggable:    false,
+		clogCode:    "rejected_with_reason",
+		clogMsg:     desc,
+		clogExtCode: code,
+	}
+}
 
 // Foreman takes care of managing our set of sending workers and assigns msgs for each to send
 type Foreman struct {
@@ -204,31 +325,17 @@ func (w *Sender) sendMessage(msg MsgOut) {
 		log.Warn("duplicate send, marking as wired")
 
 	} else {
-		// send our message
-		status, err = handler.Send(sendCTX, msg, clog)
+
+		status = w.sendByHandler(sendCTX, handler, msg, clog, log)
+
 		duration := time.Since(start)
 		secondDuration := float64(duration) / float64(time.Second)
+		log.Debug("send complete", "status", status.Status(), "elapsed", duration)
 
-		if err != nil {
-			log.Error("error sending message", "error", err, "elapsed", duration)
-
-			// handlers should log errors implicitly with user friendly messages.. but if not.. add what we have
-			if len(clog.Errors()) == 0 {
-				clog.RawError(err)
-			}
-
-			// possible for handlers to only return an error in which case we construct an error status
-			if status == nil {
-				status = backend.NewStatusUpdate(msg.Channel(), msg.ID(), MsgStatusErrored, clog)
-			}
-		}
-
-		// report to librato and log locally
+		// report to librato
 		if status.Status() == MsgStatusErrored || status.Status() == MsgStatusFailed {
-			log.Warn("msg errored", "elapsed", duration)
 			analytics.Gauge(fmt.Sprintf("courier.msg_send_error_%s", msg.Channel().ChannelType()), secondDuration)
 		} else {
-			log.Debug("msg sent", "elapsed", duration)
 			analytics.Gauge(fmt.Sprintf("courier.msg_send_%s", msg.Channel().ChannelType()), secondDuration)
 		}
 	}
@@ -252,4 +359,55 @@ func (w *Sender) sendMessage(msg MsgOut) {
 
 	// mark our send task as complete
 	backend.MarkOutgoingMsgComplete(writeCTX, msg, status)
+}
+
+func (w *Sender) sendByHandler(ctx context.Context, h ChannelHandler, m MsgOut, clog *ChannelLog, log *slog.Logger) StatusUpdate {
+	backend := w.foreman.server.Backend()
+	res := &SendResult{newURN: urns.NilURN}
+	err := h.Send(ctx, m, res, clog)
+
+	status := backend.NewStatusUpdate(m.Channel(), m.ID(), MsgStatusWired, clog)
+
+	// fow now we can only store one external id per message
+	if len(res.ExternalIDs()) > 0 {
+		status.SetExternalID(res.ExternalIDs()[0])
+	}
+
+	if res.newURN != urns.NilURN {
+		urnErr := status.SetURNUpdate(m.URN(), res.newURN)
+		if urnErr != nil {
+			clog.RawError(urnErr)
+		}
+	}
+
+	var serr *SendError
+	if errors.As(err, &serr) {
+		if serr.loggable {
+			log.Error("error sending message", "error", err)
+		}
+		if serr.retryable {
+			status.SetStatus(MsgStatusErrored)
+		} else {
+			status.SetStatus(MsgStatusFailed)
+		}
+
+		clog.Error(NewChannelError(serr.clogCode, serr.clogExtCode, serr.clogMsg))
+
+		// if handler returned ErrContactStopped need to write a stop event
+		if serr == ErrContactStopped {
+			channelEvent := backend.NewChannelEvent(m.Channel(), EventTypeStopContact, m.URN(), clog)
+			if err = backend.WriteChannelEvent(ctx, channelEvent, clog); err != nil {
+				log.Error("error writing stop event", "error", err)
+			}
+		}
+
+	} else if err != nil {
+		log.Error("error sending message", "error", err)
+
+		status.SetStatus(MsgStatusErrored)
+
+		clog.Error(NewChannelError("internal_error", "", "An internal error occured."))
+	}
+
+	return status
 }

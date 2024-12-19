@@ -13,6 +13,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 const configAccountID = "account_id"
@@ -65,7 +66,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(form.From, channel.Country())
+	urn, err := urns.ParsePhone(form.From, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -134,24 +135,13 @@ type mtMessage struct {
 	Message string `json:"message"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	accountID := msg.Channel().StringConfigForKey(configAccountID, "")
-	if accountID == "" {
-		return nil, fmt.Errorf("no account id set for TQ channel")
-	}
-
 	tokenUser := msg.Channel().StringConfigForKey(configAPITokenUser, "")
-	if tokenUser == "" {
-		return nil, fmt.Errorf("no token user set for TQ channel")
-	}
-
 	token := msg.Channel().StringConfigForKey(configAPIToken, "")
-	if token == "" {
-		return nil, fmt.Errorf("no token set for TQ channel")
+	if accountID == "" || tokenUser == "" || token == "" {
+		return courier.ErrChannelConfig
 	}
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	// we send attachments first so that text appears below
 	for _, a := range msg.Attachments() {
@@ -166,27 +156,28 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf(sendMMSURL, accountID), data)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", form.FormDataContentType())
 		req.Header.Set("Accept", "application/json")
 		req.SetBasicAuth(tokenUser, token)
 
 		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
 		// try to get our external id
 		externalID, err := jsonparser.GetString(respBody, "guid")
 		if err != nil {
 			clog.Error(courier.ErrorResponseValueMissing("guid"))
-			return status, nil
+			return courier.ErrResponseUnexpected
 		}
-		status.SetStatus(courier.MsgStatusWired)
-		status.SetExternalID(externalID)
-	}
 
+		res.AddExternalID(externalID)
+	}
 	// now send our text if we have any
 	if msg.Text() != "" {
 		parts := handlers.SplitMsgByChannel(msg.Channel(), msg.Text(), maxMsgLength)
@@ -199,30 +190,31 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 			bodyJSON, _ := json.Marshal(body)
 			req, err := http.NewRequest(http.MethodPost, fmt.Sprintf(sendURL, accountID), bytes.NewBuffer(bodyJSON))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json")
 			req.SetBasicAuth(tokenUser, token)
 
 			resp, respBody, err := h.RequestHTTP(req, clog)
-			if err != nil || resp.StatusCode/100 != 2 {
-				return status, nil
+			if err != nil || resp.StatusCode/100 == 5 {
+				return courier.ErrConnectionFailed
+			} else if resp.StatusCode/100 != 2 {
+				return courier.ErrResponseStatus
 			}
 
 			// get our external id
 			externalID, err := jsonparser.GetString(respBody, "guid")
 			if err != nil {
 				clog.Error(courier.ErrorResponseValueMissing("guid"))
-				return status, nil
+				return courier.ErrResponseUnexpected
 			}
 
-			status.SetStatus(courier.MsgStatusWired)
-			status.SetExternalID(externalID)
+			res.AddExternalID(externalID)
 		}
 	}
 
-	return status, nil
+	return nil
 }
 
 func (h *handler) RedactValues(ch courier.Channel) []string {

@@ -11,6 +11,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/gsm7"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -51,7 +52,7 @@ func (h *handler) receiveMessage(ctx context.Context, c courier.Channel, w http.
 	}
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(from, c.Country())
+	urn, err := urns.ParsePhone(from, c.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, c, w, r, err)
 	}
@@ -68,16 +69,11 @@ func (h *handler) WriteMsgSuccessResponse(ctx context.Context, w http.ResponseWr
 	return err
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for M3 channel")
-	}
-
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return nil, fmt.Errorf("no password set for M3 channel")
+	if username == "" || password == "" {
+		return courier.ErrChannelConfig
 	}
 
 	// figure out if we need to send as unicode (encoding 7)
@@ -87,8 +83,6 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		encoding = "7"
 	}
 
-	// send our message
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 	for _, part := range handlers.SplitMsgByChannel(msg.Channel(), text, maxMsgLength) {
 		// build our request
 		params := url.Values{
@@ -110,17 +104,16 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		msgURL.RawQuery = params.Encode()
 		req, err := http.NewRequest(http.MethodGet, msgURL.String(), nil)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		resp, _, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			break
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
-
-		// all went well, set ourselves to wired
-		status.SetStatus(courier.MsgStatusWired)
 	}
 
-	return status, nil
+	return nil
 }

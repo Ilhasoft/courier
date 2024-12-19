@@ -1,3 +1,242 @@
+v9.2.0 (2024-07-17)
+-------------------------
+ * Update README
+
+v9.1.53 (2024-07-15)
+-------------------------
+ * Update deps
+
+v9.1.52 (2024-07-10)
+-------------------------
+ * Start writing msgs_msg.is_android
+
+v9.1.51 (2024-07-01)
+-------------------------
+ * Update deps
+
+v9.1.50 (2024-06-20)
+-------------------------
+ * Update chi library
+
+v9.1.49 (2024-06-17)
+-------------------------
+ * Adjust WA template to be send if present even when we have attachments
+
+v9.1.48 (2024-06-14)
+-------------------------
+ * Fix legacy WA components parameters
+
+v9.1.47 (2024-06-10)
+-------------------------
+ * Support template component types header/* and body/*
+
+v9.1.46 (2024-06-07)
+-------------------------
+ * Make sure TWA channels send the set messaging service SID when sending messages
+
+v9.1.45 (2024-06-06)
+-------------------------
+ * Adjust attachment variables for TWA templates
+
+v9.1.44 (2024-06-06)
+-------------------------
+ * Use split attachments for templates media attachment for consistency with messages attachments
+
+v9.1.43 (2024-06-04)
+-------------------------
+ * Update slog-multi
+
+v9.1.42 (2024-06-03)
+-------------------------
+ * Update deps
+ * Replace incorrect usages of ErrFailedWithReason
+ * Add support for sending Twilio content templates
+ * Use std library errors everywhere
+
+v9.1.41 (2024-05-29)
+-------------------------
+ * Add attachment support for chip
+
+v9.1.40 (2024-05-29)
+-------------------------
+ * Set content-type header in chip handler
+
+v9.1.39 (2024-05-29)
+-------------------------
+ * Fix hoormund bug so we don't ignore errors from fetching tokens
+ * Add test to make sure URN are normalized for EX channel with non phone schemes
+ * Allow sender ID tel urns on twilio channels
+
+v9.1.38 (2024-05-09)
+-------------------------
+ * Fix ext urns creation so we trigger normalization
+
+v9.1.37 (2024-05-09)
+-------------------------
+ * Update to latest gocommon
+
+v9.1.36 (2024-05-09)
+-------------------------
+ * Update to latest gocommon
+
+v9.1.35 (2024-05-09)
+-------------------------
+ * Fix HM token expiration timeout
+
+v9.1.34 (2024-05-08)
+-------------------------
+ * Update gocommon
+
+v9.1.33 (2024-05-08)
+-------------------------
+ * Update to latest gocommon and trust urns.ParsePhone for phone number parsing
+
+v9.1.32 (2024-05-07)
+-------------------------
+ * Update to new gocommon with urns changes
+
+v9.1.31 (2024-04-29)
+-------------------------
+ * Add support for read msg status
+
+v9.1.30 (2024-04-26)
+-------------------------
+ * Use filetype package to check file content for application/octet-stream content type header
+
+v9.1.29 (2024-04-26)
+-------------------------
+ * Prioritize the content-type header for attachments response for mimetype detection
+
+v9.1.28 (2024-04-22)
+-------------------------
+ * Support retrying failed messages for rate limit on Twilio WhatsApp
+
+v9.1.27 (2024-04-22)
+-------------------------
+ * Update deps
+
+v9.1.26 (2024-04-17)
+-------------------------
+ * Use variables in templating instead of params
+
+v9.1.25 (2024-04-17)
+-------------------------
+ * Read templating from new msg field instead of metadata
+ * Update test data schema inline with recent RP changes
+
+v9.1.24 (2024-04-08)
+-------------------------
+ * Stop writing Msg.queued_on
+
+v9.1.23 (2024-04-03)
+-------------------------
+ * Adjust legacy WA channel handler to use templating components
+
+v9.1.22 (2024-04-02)
+-------------------------
+ * Start writing status field on channel events as P
+
+v9.1.21 (2024-03-28)
+-------------------------
+ * Queue all channel events to mailroom as a single task type
+
+v9.1.20 (2024-03-28)
+-------------------------
+ * Update payloads for tasks queued to mailroom
+
+v9.1.19 (2024-03-20)
+-------------------------
+ * Use component name to find button index
+
+v9.1.18 (2024-03-20)
+-------------------------
+ * Update to use templating components with type
+
+v9.1.17 (2024-03-15)
+-------------------------
+ * Fix WA templating generation and add tests
+ * Fix max length for D3C
+
+v9.1.16 (2024-03-15)
+-------------------------
+ * Make parameter with type url to be sent as url buttons in WA handler
+
+v9.1.15 (2024-03-14)
+-------------------------
+ * Update deps
+
+v9.1.14 (2024-03-12)
+-------------------------
+ * Remove S3 region is media hostname before matching the media domain
+ * Unresolveable media should create channel log error
+
+v9.1.13 (2024-03-07)
+-------------------------
+ * Return error with line attachments issues
+ * Update to chi v5 and go 1.22
+
+v9.1.12 (2024-02-29)
+-------------------------
+ * Replace use of deprecated test fields
+ * Rework WA handler to new send, remove channel legacy handler
+
+v9.1.11 (2024-02-28)
+-------------------------
+ * Rework more send methods
+
+v9.1.10 (2024-02-26)
+-------------------------
+ * Rework more handlers send methods
+
+v9.1.9 (2024-02-23)
+-------------------------
+ * Rework more send methods
+
+v9.1.8 (2024-02-21)
+-------------------------
+ * Rework more handler sends
+
+v9.1.7 (2024-02-20)
+-------------------------
+ * Rework more handlers to new send method and improve tests
+
+v9.1.6 (2024-02-14)
+-------------------------
+ * Rework Telgram, Yo and Zenvia handlers to new send method
+
+v9.1.5 (2024-02-05)
+-------------------------
+ * Use markdown formatting for Telegram messages
+ * Update temba-chat handler to support multiple events per request and channel secrets
+
+v9.1.4 (2024-02-05)
+-------------------------
+ * Support MarkdownV2 text formatting styles
+ * Tweak experimental temba-chat handler
+
+v9.1.3 (2024-01-25)
+-------------------------
+ * Remove mailgun handler and revert change from user ids to user ref objects
+ * Simplify channel loading and caching
+
+v9.1.2 (2024-01-23)
+-------------------------
+ * Add optional user email and name to queued messages
+ * Add mailgun handler
+
+v9.1.1 (2024-01-17)
+-------------------------
+ * Standardize startup code with other services
+ * Drop support for variables field in templating metadata
+ * Update to latest ezconf which has builtin support for slog.Level
+ * Use redisx.NewPool
+
+v9.1.0 (2024-01-15)
+-------------------------
+ * Add support for chat_started event on tembachat handler
+ * Use latest gocommon
+ * Add support for templating params instead of variables
+
 v9.0.1 (2024-01-08)
 -------------------------
  * Fix sending bandwidth MMS without text

@@ -6,7 +6,7 @@ import "github.com/nyaruka/courier"
 var StatusMapping = map[string]courier.MsgStatus{
 	"sent":      courier.MsgStatusSent,
 	"delivered": courier.MsgStatusDelivered,
-	"read":      courier.MsgStatusDelivered,
+	"read":      courier.MsgStatusRead,
 	"failed":    courier.MsgStatusFailed,
 }
 
@@ -153,6 +153,7 @@ type Button struct {
 type Param struct {
 	Type     string `json:"type"`
 	Text     string `json:"text"`
+	Payload  string `json:"payload,omitempty"`
 	Image    *Media `json:"image,omitempty"`
 	Document *Media `json:"document,omitempty"`
 	Video    *Media `json:"video,omitempty"`
@@ -160,8 +161,8 @@ type Param struct {
 
 type Component struct {
 	Type    string   `json:"type"`
-	SubType string   `json:"sub_type"`
-	Index   string   `json:"index"`
+	SubType string   `json:"sub_type,omitempty"`
+	Index   string   `json:"index,omitempty"`
 	Params  []*Param `json:"parameters"`
 }
 
@@ -180,7 +181,7 @@ type Language struct {
 type Template struct {
 	Name       string       `json:"name"`
 	Language   *Language    `json:"language"`
-	Components []*Component `json:"components"`
+	Components []*Component `json:"components,omitempty"`
 }
 
 // see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages#interactive-object

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -11,12 +12,13 @@ import (
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/stretchr/testify/assert"
 )
 
 var instgramTestChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c568c", "IG", "12345", "", map[string]any{courier.ConfigAuthToken: "a123"}),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c568c", "IG", "12345", "", []string{urns.Instagram.Prefix}, map[string]any{courier.ConfigAuthToken: "a123"}),
 }
 
 var instagramIncomingTests = []IncomingTestCase{
@@ -183,28 +185,36 @@ func TestInstagramIncoming(t *testing.T) {
 
 var instagramOutgoingTests = []OutgoingTestCase{
 	{
-		Label:               "Text only chat message",
-		MsgText:             "Simple Message",
-		MsgURN:              "instagram:12345",
-		MsgOrigin:           courier.MsgOriginChat,
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:     "Text only chat message",
+		MsgText:   "Simple Message",
+		MsgURN:    "instagram:12345",
+		MsgOrigin: courier.MsgOriginChat,
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
-		Label:               "Text only broadcast message",
-		MsgText:             "Simple Message",
-		MsgURN:              "instagram:12345",
-		MsgOrigin:           courier.MsgOriginBroadcast,
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:     "Text only broadcast message",
+		MsgText:   "Simple Message",
+		MsgURN:    "instagram:12345",
+		MsgOrigin: courier.MsgOriginBroadcast,
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
 		Label:                   "Text only flow response",
@@ -212,126 +222,172 @@ var instagramOutgoingTests = []OutgoingTestCase{
 		MsgURN:                  "instagram:12345",
 		MsgOrigin:               courier.MsgOriginFlow,
 		MsgResponseToExternalID: "23526",
-		MockResponseBody:        `{"message_id": "mid.133"}`,
-		MockResponseStatus:      200,
-		ExpectedRequestBody:     `{"messaging_type":"RESPONSE","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
-		ExpectedMsgStatus:       "W",
-		ExpectedExternalID:      "mid.133",
-		SendPrep:                setSendURL,
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"RESPONSE","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
-		Label:               "Quick replies on a broadcast message",
-		MsgText:             "Are you happy?",
-		MsgURN:              "instagram:12345",
-		MsgOrigin:           courier.MsgOriginBroadcast,
-		MsgQuickReplies:     []string{"Yes", "No"},
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"Are you happy?","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:           "Quick replies on a broadcast message",
+		MsgText:         "Are you happy?",
+		MsgURN:          "instagram:12345",
+		MsgOrigin:       courier.MsgOriginBroadcast,
+		MsgQuickReplies: []string{"Yes", "No"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"text":"Are you happy?","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
-		Label:               "Message that exceeds max text length",
-		MsgText:             "This is a long message which spans more than one part, what will actually be sent in the end if we exceed the max length?",
-		MsgURN:              "instagram:12345",
-		MsgQuickReplies:     []string{"Yes", "No"},
-		MsgTopic:            "account",
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"ACCOUNT_UPDATE","recipient":{"id":"12345"},"message":{"text":"we exceed the max length?","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:           "Message that exceeds max text length",
+		MsgText:         "This is a long message which spans more than one part, what will actually be sent in the end if we exceed the max length?",
+		MsgURN:          "instagram:12345",
+		MsgQuickReplies: []string{"Yes", "No"},
+		MsgTopic:        "account",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Params: url.Values{"access_token": {"a123"}},
+				Body:   `{"messaging_type":"MESSAGE_TAG","tag":"ACCOUNT_UPDATE","recipient":{"id":"12345"},"message":{"text":"This is a long message which spans more than one part, what will actually be sent in the end if"}}`,
+			},
+			{
+				Params: url.Values{"access_token": {"a123"}},
+				Body:   `{"messaging_type":"MESSAGE_TAG","tag":"ACCOUNT_UPDATE","recipient":{"id":"12345"},"message":{"text":"we exceed the max length?","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
+			},
+		},
+		ExpectedExtIDs: []string{"mid.133", "mid.133"},
 	},
 	{
-		Label:               "Image attachment",
-		MsgURN:              "instagram:12345",
-		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"image","payload":{"url":"https://foo.bar/image.jpg","is_reusable":true}}}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:          "Image attachment",
+		MsgURN:         "instagram:12345",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"image","payload":{"url":"https://foo.bar/image.jpg","is_reusable":true}}}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
-		Label:               "Text, image attachment, quick replies and explicit message topic",
-		MsgText:             "This is some text.",
-		MsgURN:              "instagram:12345",
-		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MsgQuickReplies:     []string{"Yes", "No"},
-		MsgTopic:            "event",
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"CONFIRMED_EVENT_UPDATE","recipient":{"id":"12345"},"message":{"text":"This is some text.","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:           "Text, image attachment, quick replies and explicit message topic",
+		MsgText:         "This is some text.",
+		MsgURN:          "instagram:12345",
+		MsgAttachments:  []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MsgQuickReplies: []string{"Yes", "No"},
+		MsgTopic:        "event",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Params: url.Values{"access_token": {"a123"}},
+				Body:   `{"messaging_type":"MESSAGE_TAG","tag":"CONFIRMED_EVENT_UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"image","payload":{"url":"https://foo.bar/image.jpg","is_reusable":true}}}}`,
+			},
+			{
+				Params: url.Values{"access_token": {"a123"}},
+				Body:   `{"messaging_type":"MESSAGE_TAG","tag":"CONFIRMED_EVENT_UPDATE","recipient":{"id":"12345"},"message":{"text":"This is some text.","quick_replies":[{"title":"Yes","payload":"Yes","content_type":"text"},{"title":"No","payload":"No","content_type":"text"}]}}`,
+			},
+		},
+		ExpectedExtIDs: []string{"mid.133", "mid.133"},
 	},
 	{
-		Label:               "Explicit human agent tag",
-		MsgText:             "Simple Message",
-		MsgURN:              "instagram:12345",
-		MsgTopic:            "agent",
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:    "Explicit human agent tag",
+		MsgText:  "Simple Message",
+		MsgURN:   "instagram:12345",
+		MsgTopic: "agent",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"MESSAGE_TAG","tag":"HUMAN_AGENT","recipient":{"id":"12345"},"message":{"text":"Simple Message"}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
-		Label:               "Document attachment",
-		MsgURN:              "instagram:12345",
-		MsgAttachments:      []string{"application/pdf:https://foo.bar/document.pdf"},
-		MockResponseBody:    `{"message_id": "mid.133"}`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"file","payload":{"url":"https://foo.bar/document.pdf","is_reusable":true}}}}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "mid.133",
-		SendPrep:            setSendURL,
+		Label:          "Document attachment",
+		MsgURN:         "instagram:12345",
+		MsgAttachments: []string{"application/pdf:https://foo.bar/document.pdf"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"file","payload":{"url":"https://foo.bar/document.pdf","is_reusable":true}}}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
 	},
 	{
-		Label:              "Response doesn't contain message id",
-		MsgText:            "ID Error",
-		MsgURN:             "instagram:12345",
-		MockResponseBody:   `{ "is_error": true }`,
-		MockResponseStatus: 200,
-		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
-		SendPrep:           setSendURL,
+		Label:   "Response doesn't contain message id",
+		MsgText: "ID Error",
+		MsgURN:  "instagram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "is_error": true }`)),
+			},
+		},
+		ExpectedError: courier.ErrResponseUnexpected,
 	},
 	{
-		Label:              "Response status code is non-200",
-		MsgText:            "Error",
-		MsgURN:             "instagram:12345",
-		MockResponseBody:   `{ "is_error": true }`,
-		MockResponseStatus: 403,
-		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
-		SendPrep:           setSendURL,
+		Label:   "Response status code is non-200",
+		MsgText: "Error",
+		MsgURN:  "instagram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(403, nil, []byte(`{ "is_error": true }`)),
+			},
+		},
+		ExpectedError: courier.ErrResponseStatus,
 	},
 	{
-		Label:              "Response is invalid JSON",
-		MsgText:            "Error",
-		MsgURN:             "instagram:12345",
-		MockResponseBody:   `bad json`,
-		MockResponseStatus: 200,
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Response is invalid JSON",
+		MsgText: "Error",
+		MsgURN:  "instagram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`bad json`)),
+			},
+		},
+		ExpectedError: courier.ErrResponseUnparseable,
 	},
 	{
-		Label:              "Response is channel specific error",
-		MsgText:            "Error",
-		MsgURN:             "instagram:12345",
-		MockResponseBody:   `{ "error": {"message": "The image size is too large.","code": 36000 }}`,
-		MockResponseStatus: 400,
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("36000", "The image size is too large.")},
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Response is channel specific error",
+		MsgText: "Error",
+		MsgURN:  "instagram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v17.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "error": {"message": "The image size is too large.","code": 36000 }}`)),
+			},
+		},
+		ExpectedError: courier.ErrFailedWithReason("36000", "The image size is too large."),
 	},
 }
 
@@ -339,7 +395,7 @@ func TestInstagramOutgoing(t *testing.T) {
 	// shorter max msg length for testing
 	maxMsgLength = 100
 
-	var channel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "IG", "12345", "", map[string]any{courier.ConfigAuthToken: "a123"})
+	var channel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "IG", "12345", "", []string{urns.Instagram.Prefix}, map[string]any{courier.ConfigAuthToken: "a123"})
 
 	checkRedacted := []string{"wac_admin_system_user_token", "missing_facebook_app_secret", "missing_facebook_webhook_secret", "a123"}
 
@@ -394,7 +450,7 @@ func TestInstagramDescribeURN(t *testing.T) {
 
 	channel := instgramTestChannels[0]
 	handler := newHandler("IG", "Instagram")
-	handler.Initialize(test.NewMockServer(courier.NewConfig(), test.NewMockBackend()))
+	handler.Initialize(test.NewMockServer(courier.NewDefaultConfig(), test.NewMockBackend()))
 	clog := courier.NewChannelLog(courier.ChannelLogTypeUnknown, channel, handler.RedactValues(channel))
 
 	tcs := []struct {
@@ -415,7 +471,7 @@ func TestInstagramDescribeURN(t *testing.T) {
 
 func TestInstagramBuildAttachmentRequest(t *testing.T) {
 	mb := test.NewMockBackend()
-	s := courier.NewServer(courier.NewConfig(), mb)
+	s := courier.NewServer(courier.NewDefaultConfig(), mb)
 
 	handler := &handler{NewBaseHandler(courier.ChannelType("IG"), "Instagram", DisableUUIDRouting())}
 	handler.Initialize(s)

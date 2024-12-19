@@ -11,7 +11,6 @@ import (
 	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/null/v3"
-	"github.com/pkg/errors"
 )
 
 // ContactURNID represents a contact urn's id
@@ -145,7 +144,7 @@ func setDefaultURN(db *sqlx.Tx, channel *Channel, contact *Contact, urn urns.URN
 			existing.Priority = currPriority
 
 			// if this is a phone number and we just received a message on a tel scheme, set that as our new preferred channel
-			if existing.Scheme == urns.TelScheme && scheme == urns.TelScheme && channel.HasRole(courier.ChannelRoleSend) {
+			if existing.Scheme == urns.Phone.Prefix && scheme == urns.Phone.Prefix && channel.HasRole(courier.ChannelRoleSend) {
 				existing.ChannelID = channel.ID()
 			}
 			currPriority--
@@ -178,14 +177,14 @@ func getOrCreateContactURN(db *sqlx.Tx, channel *Channel, contactID ContactID, u
 	}
 	err := db.Get(contactURN, sqlSelectURNByIdentity, channel.OrgID(), urn.Identity())
 	if err != nil && err != sql.ErrNoRows {
-		return nil, errors.Wrap(err, "error looking up URN by identity")
+		return nil, fmt.Errorf("error looking up URN by identity: %w", err)
 	}
 
 	// we didn't find it, let's insert it
 	if err == sql.ErrNoRows {
 		err = insertContactURN(db, contactURN)
 		if err != nil {
-			return nil, errors.Wrap(err, "error inserting URN")
+			return nil, fmt.Errorf("error inserting URN: %w", err)
 		}
 	}
 
@@ -201,7 +200,7 @@ func getOrCreateContactURN(db *sqlx.Tx, channel *Channel, contactID ContactID, u
 		contactURN.Display = display
 		err = updateContactURN(db, contactURN)
 		if err != nil {
-			return nil, errors.Wrap(err, "error updating URN")
+			return nil, fmt.Errorf("error updating URN: %w", err)
 		}
 	}
 
@@ -211,8 +210,10 @@ func getOrCreateContactURN(db *sqlx.Tx, channel *Channel, contactID ContactID, u
 
 		err = updateContactURN(db, contactURN)
 	}
-
-	return contactURN, errors.Wrap(err, "error updating URN auth")
+	if err != nil {
+		return contactURN, fmt.Errorf("error updating URN auth: %w", err)
+	}
+	return contactURN, nil
 }
 
 const sqlInsertURN = `

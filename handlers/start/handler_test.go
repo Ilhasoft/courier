@@ -1,7 +1,6 @@
 package start
 
 import (
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -9,10 +8,11 @@ import (
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "ST", "2020", "UA", map[string]any{"username": "st-username", "password": "st-password"}),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "ST", "2020", "UA", []string{urns.Phone.Prefix}, map[string]any{"username": "st-username", "password": "st-password"}),
 }
 
 const (
@@ -119,7 +119,7 @@ var testCases = []IncomingTestCase{
 		URL:                  receiveURL,
 		Data:                 invalidURNReceive,
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	{
 		Label:                "Receive missing Request ID",
@@ -159,90 +159,111 @@ func BenchmarkHandler(b *testing.B) {
 	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
 }
 
-// setSendURL takes care of setting the sendURL to call
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
 var defaultSendTestCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`,
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/xml; charset=utf8",
-			"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+		Label:   "Plain Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://bulk.startmobile.ua/clients.php": {
+				httpx.NewMockResponse(200, nil, []byte(`<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`)),
+			},
 		},
-		ExpectedRequestBody: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">Simple Message ☺</body></message>`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "380502535130309161501",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/xml; charset=utf8",
+				"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+			},
+			Body: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">Simple Message ☺</body></message>`,
+		}},
+		ExpectedExtIDs: []string{"380502535130309161501"},
 	},
 	{
-		Label:              "Long Send",
-		MsgText:            "This is a longer message than 160 characters and will cause us to split it into two separate parts, isn't that right but it is even longer than before I say, I need to keep adding more things to make it work",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`,
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/xml; charset=utf8",
-			"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+		Label:   "Long Send",
+		MsgText: "This is a longer message than 160 characters and will cause us to split it into two separate parts, isn't that right but it is even longer than before I say, I need to keep adding more things to make it work",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://bulk.startmobile.ua/clients.php": {
+				httpx.NewMockResponse(200, nil, []byte(`<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`)),
+				httpx.NewMockResponse(200, nil, []byte(`<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`)),
+			},
 		},
-		ExpectedRequestBody: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">I need to keep adding more things to make it work</body></message>`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "380502535130309161501",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Headers: map[string]string{
+					"Content-Type":  "application/xml; charset=utf8",
+					"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+				},
+				Body: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">This is a longer message than 160 characters and will cause us to split it into two separate parts, isn&#39;t that right but it is even longer than before I say,</body></message>`,
+			},
+			{
+				Headers: map[string]string{
+					"Content-Type":  "application/xml; charset=utf8",
+					"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+				},
+				Body: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">I need to keep adding more things to make it work</body></message>`,
+			}},
+		ExpectedExtIDs: []string{"380502535130309161501", "380502535130309161501"},
 	},
 	{
-		Label:              "Send Attachment",
-		MsgText:            "My pic!",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`,
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/xml; charset=utf8",
-			"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+		Label:          "Send Attachment",
+		MsgText:        "My pic!",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MsgURN:         "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://bulk.startmobile.ua/clients.php": {
+				httpx.NewMockResponse(200, nil, []byte(`<status date='Wed, 25 May 2016 17:29:56 +0300'><id>380502535130309161501</id><state>Accepted</state></status>`)),
+			},
 		},
-		ExpectedRequestBody: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">My pic!&#xA;https://foo.bar/image.jpg</body></message>`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "380502535130309161501",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/xml; charset=utf8",
+				"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+			},
+			Body: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">My pic!&#xA;https://foo.bar/image.jpg</body></message>`,
+		}},
+		ExpectedExtIDs: []string{"380502535130309161501"},
 	},
 	{
-		Label:              "Error Response",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `<error>This is an error</error>`,
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/xml; charset=utf8",
-			"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+		Label:   "Error Response",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://bulk.startmobile.ua/clients.php": {
+				httpx.NewMockResponse(200, nil, []byte(`<error>This is an error</error>`)),
+			},
 		},
-		ExpectedRequestBody: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">Simple Message ☺</body></message>`,
-		ExpectedMsgStatus:   "E",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/xml; charset=utf8",
+				"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+			},
+			Body: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">Simple Message ☺</body></message>`,
+		}},
+		ExpectedError: courier.ErrResponseUnparseable,
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `Error`,
-		MockResponseStatus: 401,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/xml; charset=utf8",
-			"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://bulk.startmobile.ua/clients.php": {
+				httpx.NewMockResponse(401, nil, []byte(`Error`)),
+			},
 		},
-		ExpectedRequestBody: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">Error Message</body></message>`,
-		ExpectedMsgStatus:   "E",
-		SendPrep:            setSendURL,
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/xml; charset=utf8",
+				"Authorization": "Basic VXNlcm5hbWU6UGFzc3dvcmQ=",
+			},
+			Body: `<message><service id="single" source="2020" validity="+12 hours"></service><to>+250788383383</to><body content-type="plain/text" encoding="plain">Error Message</body></message>`,
+		}},
+		ExpectedError: courier.ErrResponseStatus,
 	},
 }
 
 func TestOutgoing(t *testing.T) {
 	maxMsgLength = 160
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "ST", "2020", "UA", map[string]any{"username": "Username", "password": "Password"})
+	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "ST", "2020", "UA", []string{urns.Phone.Prefix}, map[string]any{"username": "Username", "password": "Password"})
 	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{httpx.BasicAuth("Username", "Password")}, nil)
 }

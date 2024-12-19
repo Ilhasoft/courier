@@ -3,6 +3,7 @@ package courier
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -10,10 +11,9 @@ import (
 	"net/url"
 	"path/filepath"
 
+	"github.com/h2non/filetype"
 	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/httpx"
-	"github.com/pkg/errors"
-	"gopkg.in/h2non/filetype.v1"
 )
 
 const (
@@ -41,12 +41,12 @@ type fetchAttachmentResponse struct {
 func fetchAttachment(ctx context.Context, b Backend, r *http.Request) (*fetchAttachmentResponse, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, errors.Wrap(err, "error reading request body")
+		return nil, fmt.Errorf("error reading request body: %w", err)
 	}
 
 	fa := &fetchAttachmentRequest{}
 	if err := json.Unmarshal(body, fa); err != nil {
-		return nil, errors.Wrap(err, "error unmarshalling request")
+		return nil, fmt.Errorf("error unmarshalling request: %w", err)
 	}
 	if err := utils.Validate(fa); err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func fetchAttachment(ctx context.Context, b Backend, r *http.Request) (*fetchAtt
 
 	ch, err := b.GetChannel(ctx, fa.ChannelType, fa.ChannelUUID)
 	if err != nil {
-		return nil, errors.Wrap(err, "error getting channel")
+		return nil, fmt.Errorf("error getting channel: %w", err)
 	}
 
 	clog := NewChannelLogForAttachmentFetch(ch, GetHandler(ch.ChannelType()).RedactValues(ch))
@@ -90,7 +90,7 @@ func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, at
 		attRequest, err = http.NewRequest(http.MethodGet, attURL, nil)
 	}
 	if err != nil {
-		return nil, errors.Wrap(err, "unable to create attachment request")
+		return nil, fmt.Errorf("unable to create attachment request: %w", err)
 	}
 
 	trace, err := httpx.DoTrace(b.HttpClient(true), attRequest, nil, b.HttpAccess(), maxAttBodyReadBytes)
@@ -113,29 +113,31 @@ func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, at
 		extension = extension[1:]
 	}
 
-	// first try getting our mime type from the first 300 bytes of our body
-	fileType, _ := filetype.Match(trace.ResponseBody[:300])
-	if fileType != filetype.Unknown {
-		mimeType = fileType.MIME.Value
-		extension = fileType.Extension
-	} else {
-		// if that didn't work, try from our extension
-		fileType = filetype.GetType(extension)
-		if fileType != filetype.Unknown {
-			mimeType = fileType.MIME.Value
-			extension = fileType.Extension
-		}
-	}
-
-	// we still don't know our mime type, use our content header instead
-	if mimeType == "" {
-		mimeType, _, _ = mime.ParseMediaType(trace.Response.Header.Get("Content-Type"))
+	// prioritize to use the response content type header if provided
+	contentTypeHeader := trace.Response.Header.Get("Content-Type")
+	if contentTypeHeader != "" && contentTypeHeader != "application/octet-stream" {
+		mimeType, _, _ = mime.ParseMediaType(contentTypeHeader)
 		if extension == "" {
 			extensions, err := mime.ExtensionsByType(mimeType)
 			if extensions == nil || err != nil {
 				extension = ""
 			} else {
 				extension = extensions[0][1:]
+			}
+		}
+	} else {
+
+		// first try getting our mime type from the first 300 bytes of our body
+		fileType, _ := filetype.Match(trace.ResponseBody[:300])
+		if fileType != filetype.Unknown {
+			mimeType = fileType.MIME.Value
+			extension = fileType.Extension
+		} else {
+			// if that didn't work, try from our extension
+			fileType = filetype.GetType(extension)
+			if fileType != filetype.Unknown {
+				mimeType = fileType.MIME.Value
+				extension = fileType.Extension
 			}
 		}
 	}
