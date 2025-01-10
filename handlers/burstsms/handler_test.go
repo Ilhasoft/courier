@@ -1,7 +1,6 @@
 package burstsms
 
 import (
-	"net/http/httptest"
 	"net/url"
 	"testing"
 
@@ -9,11 +8,8 @@ import (
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BS", "2020", "US", nil),
-}
 
 const (
 	receiveURL = "/c/bs/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive/"
@@ -51,25 +47,24 @@ var testCases = []IncomingTestCase{
 }
 
 func TestIncoming(t *testing.T) {
-	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BS", "2020", "US", []string{urns.Phone.Prefix}, nil),
+	}
+
+	RunIncomingTestCases(t, chs, newHandler(), testCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
-}
-
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
-var defaultSendTestCases = []OutgoingTestCase{
+var outgoingCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{ "message_id": 19835, "recipients": 3, "cost": 1.000 }`,
-		MockResponseStatus: 200,
+		Label:          "Plain Send",
+		MsgText:        "Simple Message ☺",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.transmitsms.com/send-sms.json": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "message_id": 19835, "recipients": 3, "cost": 1.000 }`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Form: url.Values{
@@ -79,46 +74,75 @@ var defaultSendTestCases = []OutgoingTestCase{
 				},
 			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "19835",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"19835"},
 	},
 	{
-		Label:              "Invalid JSON",
-		MsgText:            "Invalid JSON",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `not json`,
-		MockResponseStatus: 200,
-		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("XML")},
-		SendPrep:           setSendURL,
+		Label:   "Invalid JSON",
+		MsgText: "Invalid JSON",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.transmitsms.com/send-sms.json": {
+				httpx.NewMockResponse(200, nil, []byte(`not json`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"to":      {"250788383383"},
+					"message": {"Invalid JSON"},
+					"from":    {"2020"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrResponseUnparseable,
 	},
 	{
-		Label:              "Error Response",
-		MsgText:            "Error Response",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{ "message_id": 0 }`,
-		MockResponseStatus: 200,
-		ExpectedMsgStatus:  "F",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
-		SendPrep:           setSendURL,
+		Label:   "Error Response",
+		MsgText: "Error Response",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.transmitsms.com/send-sms.json": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "message_id": 0 }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"to":      {"250788383383"},
+					"message": {"Error Response"},
+					"from":    {"2020"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrResponseUnexpected,
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `Bad Gateway`,
-		MockResponseStatus: 501,
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.transmitsms.com/send-sms.json": {
+				httpx.NewMockResponse(501, nil, []byte(`Bad Gateway`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"to":      {"250788383383"},
+					"message": {"Error Message"},
+					"from":    {"2020"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrConnectionFailed,
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BS", "2020", "US",
-		map[string]any{
-			courier.ConfigUsername: "user1",
-			courier.ConfigPassword: "pass1",
-		})
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{httpx.BasicAuth("user1", "pass1")}, nil)
+	ch := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BS", "2020", "US",
+		[]string{urns.Phone.Prefix},
+		map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1"},
+	)
+
+	RunOutgoingTestCases(t, ch, newHandler(), outgoingCases, []string{httpx.BasicAuth("user1", "pass1")}, nil)
 }

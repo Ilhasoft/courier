@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -22,7 +23,6 @@ import (
 	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 // Endpoints we hit
@@ -304,9 +304,9 @@ func (h *handler) processWhatsAppPayload(ctx context.Context, channel courier.Ch
 				}
 				date := parseTimestamp(ts)
 
-				urn, err := urns.NewWhatsAppURN(msg.From)
+				urn, err := urns.New(urns.WhatsApp, msg.From)
 				if err != nil {
-					return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+					return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid whatsapp id"))
 				}
 
 				for _, msgError := range msg.Errors {
@@ -455,14 +455,14 @@ func (h *handler) processFacebookInstagramPayload(ctx context.Context, channel c
 
 		// create our URN
 		if payload.Object == "instagram" {
-			urn, err = urns.NewInstagramURN(sender)
+			urn, err = urns.New(urns.Instagram, sender)
 			if err != nil {
-				return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+				return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid instagram id"))
 			}
 		} else {
-			urn, err = urns.NewFacebookURN(sender)
+			urn, err = urns.New(urns.Facebook, sender)
 			if err != nil {
-				return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+				return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid facebook id"))
 			}
 		}
 
@@ -491,7 +491,7 @@ func (h *handler) processFacebookInstagramPayload(ctx context.Context, channel c
 				//    Right now that we even support this isn't documented and I don't think anybody uses it, so leaving that out.
 				//    (things will still work, we just will have dupe contacts, one with user_ref for the first contact, then with the real id when they reply)
 				if msg.OptIn.UserRef != "" {
-					urn, err = urns.NewFacebookURN(urns.FacebookRefPrefix + msg.OptIn.UserRef)
+					urn, err = urns.New(urns.Facebook, urns.FacebookRefPrefix+msg.OptIn.UserRef)
 					if err != nil {
 						return nil, nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 					}
@@ -678,29 +678,29 @@ func (h *handler) processFacebookInstagramPayload(ctx context.Context, channel c
 	return events, data, nil
 }
 
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	if msg.Channel().ChannelType() == "FBA" || msg.Channel().ChannelType() == "IG" {
-		return h.sendFacebookInstagramMsg(ctx, msg, clog)
+		return h.sendFacebookInstagramMsg(ctx, msg, res, clog)
 	} else if msg.Channel().ChannelType() == "WAC" {
-		return h.sendWhatsAppMsg(ctx, msg, clog)
+		return h.sendWhatsAppMsg(ctx, msg, res, clog)
 	}
 
-	return nil, fmt.Errorf("unssuported channel type")
+	return fmt.Errorf("unssuported channel type")
 }
 
-func (h *handler) sendFacebookInstagramMsg(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) sendFacebookInstagramMsg(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	// can't do anything without an access token
 	accessToken := msg.Channel().StringConfigForKey(courier.ConfigAuthToken, "")
 	if accessToken == "" {
-		return nil, fmt.Errorf("missing access token")
+		return courier.ErrChannelConfig
 	}
 
 	isHuman := msg.Origin() == courier.MsgOriginChat || msg.Origin() == courier.MsgOriginTicket
 	payload := &messenger.SendRequest{}
 
 	// build our recipient
-	if msg.URN().IsFacebookRef() {
-		payload.Recipient.UserRef = msg.URN().FacebookRef()
+	if IsFacebookRef(msg.URN()) {
+		payload.Recipient.UserRef = FacebookRef(msg.URN())
 	} else if msg.URNAuth() != "" {
 		payload.Recipient.NotificationMessagesToken = msg.URNAuth()
 	} else {
@@ -820,7 +820,7 @@ func (h *handler) sendFacebookInstagramMsg(ctx context.Context, msg courier.MsgO
 
 			jsonBody, err := json.Marshal(payloadMap)
 			if err != nil {
-				return status, err
+				return err
 			}
 
 			msgURL, _ := url.Parse("https://graph.facebook.com/v12.0/me/messages")
@@ -830,17 +830,17 @@ func (h *handler) sendFacebookInstagramMsg(ctx context.Context, msg courier.MsgO
 
 			req, err := http.NewRequest(http.MethodPost, msgURL.String(), bytes.NewReader(jsonBody))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json")
 			_, _, err = h.RequestHTTP(req, clog)
 			if err != nil {
-				return status, nil
+				return nil
 			}
 			status.SetStatus(courier.MsgStatusWired)
 		}
-		return status, nil
+		return nil
 	}
 	// Send each text segment and attachment separately. We send attachments first as otherwise quick replies get
 	// attached to attachment segments and are hidden when images load.
@@ -883,92 +883,85 @@ func (h *handler) sendFacebookInstagramMsg(ctx context.Context, msg courier.MsgO
 
 		req, err := http.NewRequest(http.MethodPost, msgURL.String(), bytes.NewReader(jsonBody))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 
-		_, respBody, _ := h.RequestHTTP(req, clog)
+		resp, respBody, err := h.RequestHTTP(req, clog)
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
+		}
+
 		respPayload := &messenger.SendResponse{}
 		err = json.Unmarshal(respBody, respPayload)
 		if err != nil {
-			clog.Error(courier.ErrorResponseUnparseable("JSON"))
-			return status, nil
+			return courier.ErrResponseUnparseable
 		}
 
 		if respPayload.Error.Code != 0 {
-			clog.Error(courier.ErrorExternal(strconv.Itoa(respPayload.Error.Code), respPayload.Error.Message))
-			return status, nil
+			return courier.ErrFailedWithReason(strconv.Itoa(respPayload.Error.Code), respPayload.Error.Message)
 		}
 
 		if respPayload.ExternalID == "" {
-			clog.Error(courier.ErrorResponseValueMissing("message_id"))
-			return status, nil
+			return courier.ErrResponseUnexpected
 		}
 
-		// if this is our first message, record the external id
-		if part.IsFirst {
-			status.SetExternalID(respPayload.ExternalID)
-			if msg.URN().IsFacebookRef() {
-				recipientID := respPayload.RecipientID
-				if recipientID == "" {
-					clog.Error(courier.ErrorResponseValueMissing("recipient_id"))
-					return status, nil
-				}
+		res.AddExternalID(respPayload.ExternalID)
+		if IsFacebookRef(msg.URN()) {
+			recipientID := respPayload.RecipientID
+			if recipientID == "" {
+				return courier.ErrResponseUnexpected
+			}
 
-				referralID := msg.URN().FacebookRef()
+			referralID := FacebookRef(msg.URN())
 
-				realIDURN, err := urns.NewFacebookURN(recipientID)
-				if err != nil {
-					clog.RawError(errors.Errorf("unable to make facebook urn from %s", recipientID))
-				}
+			realIDURN, err := urns.New(urns.Facebook, recipientID)
+			if err != nil {
+				clog.RawError(fmt.Errorf("unable to make facebook urn from %s", recipientID))
+			}
 
-				contact, err := h.Backend().GetContact(ctx, msg.Channel(), msg.URN(), nil, "", clog)
-				if err != nil {
-					clog.RawError(errors.Errorf("unable to get contact for %s", msg.URN().String()))
-				}
-				realURN, err := h.Backend().AddURNtoContact(ctx, msg.Channel(), contact, realIDURN, nil)
-				if err != nil {
-					clog.RawError(errors.Errorf("unable to add real facebook URN %s to contact with uuid %s", realURN.String(), contact.UUID()))
-				}
-				referralIDExtURN, err := urns.NewURNFromParts(urns.ExternalScheme, referralID, "", "")
-				if err != nil {
-					clog.RawError(errors.Errorf("unable to make ext urn from %s", referralID))
-				}
-				extURN, err := h.Backend().AddURNtoContact(ctx, msg.Channel(), contact, referralIDExtURN, nil)
-				if err != nil {
-					clog.RawError(errors.Errorf("unable to add URN %s to contact with uuid %s", extURN.String(), contact.UUID()))
-				}
+			contact, err := h.Backend().GetContact(ctx, msg.Channel(), msg.URN(), nil, "", clog)
+			if err != nil {
+				clog.RawError(fmt.Errorf("unable to get contact for %s", msg.URN().String()))
+			}
+			realURN, err := h.Backend().AddURNtoContact(ctx, msg.Channel(), contact, realIDURN, nil)
+			if err != nil {
+				clog.RawError(fmt.Errorf("unable to add real facebook URN %s to contact with uuid %s", realURN.String(), contact.UUID()))
+			}
+			referralIDExtURN, err := urns.New(urns.External, referralID)
+			if err != nil {
+				clog.RawError(fmt.Errorf("unable to make ext urn from %s", referralID))
+			}
+			extURN, err := h.Backend().AddURNtoContact(ctx, msg.Channel(), contact, referralIDExtURN, nil)
+			if err != nil {
+				clog.RawError(fmt.Errorf("unable to add URN %s to contact with uuid %s", extURN.String(), contact.UUID()))
+			}
 
-				referralFacebookURN, err := h.Backend().RemoveURNfromContact(ctx, msg.Channel(), contact, msg.URN())
-				if err != nil {
-					clog.RawError(errors.Errorf("unable to remove referral facebook URN %s from contact with uuid %s", referralFacebookURN.String(), contact.UUID()))
-				}
-
+			referralFacebookURN, err := h.Backend().RemoveURNfromContact(ctx, msg.Channel(), contact, msg.URN())
+			if err != nil {
+				clog.RawError(fmt.Errorf("unable to remove referral facebook URN %s from contact with uuid %s", referralFacebookURN.String(), contact.UUID()))
 			}
 
 		}
-
-		// this was wired successfully
-		status.SetStatus(courier.MsgStatusWired)
 	}
 
-	return status, nil
+	return nil
 }
 
-func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	// can't do anything without an access token
 	accessToken := h.Server().Config().WhatsappAdminSystemUserToken
 
-	hasNewURN := false
+	// hasNewURN := false
 	hasCaption := false
-	hasTemplate := false
+	// hasTemplate := false
 
 	base, _ := url.Parse(graphURL)
 	path, _ := url.Parse(fmt.Sprintf("/%s/messages", msg.Channel().Address()))
 	wacPhoneURL := base.ResolveReference(path)
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	msgParts := make([]string, 0)
 	if msg.Text() != "" {
@@ -978,138 +971,30 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 	menuButton := handlers.GetText("Menu", msg.Locale())
 
 	var payloadAudio whatsapp.SendRequest
-
-	for i := 0; i < len(msgParts)+len(msg.Attachments()); i++ {
+	// do we have a template?
+	if msg.Templating() != nil {
+		// hasTemplate = true
 		payload := whatsapp.SendRequest{MessagingProduct: "whatsapp", RecipientType: "individual", To: msg.URN().Path()}
+		payload.Type = "template"
+		payload.Template = whatsapp.GetTemplatePayload(msg.Templating())
+		err := h.requestWAC(payload, accessToken, res, wacPhoneURL, clog)
+		if err != nil {
+			return err
+		}
 
-		if len(msg.Attachments()) == 0 {
-			// do we have a template?
-			templating, err := whatsapp.GetTemplating(msg)
-			if err != nil {
-				return nil, errors.Wrapf(err, "unable to decode template: %s for channel: %s", string(msg.Metadata()), msg.Channel().UUID())
-			}
-			if templating != nil {
-				hasTemplate = true
-				payload.Type = "template"
+	} else {
 
-				template := whatsapp.Template{Name: templating.Template.Name, Language: &whatsapp.Language{Policy: "deterministic", Code: templating.Language}}
-				payload.Template = &template
+		for i := 0; i < len(msgParts)+len(msg.Attachments()); i++ {
+			payload := whatsapp.SendRequest{MessagingProduct: "whatsapp", RecipientType: "individual", To: msg.URN().Path()}
 
-				component := &whatsapp.Component{Type: "body"}
+			if len(msg.Attachments()) == 0 {
+				// do we have a template?
+				if msg.Templating() != nil {
+					payload.Type = "template"
+					payload.Template = whatsapp.GetTemplatePayload(msg.Templating())
 
-				for _, v := range templating.Variables {
-					component.Params = append(component.Params, &whatsapp.Param{Type: "text", Text: v})
-				}
-
-				template.Components = append(payload.Template.Components, component)
-
-				if len(msg.Attachments()) > 0 {
-
-					header := &whatsapp.Component{Type: "header"}
-
-					attType, attURL := handlers.SplitAttachment(msg.Attachments()[0])
-					attType = strings.Split(attType, "/")[0]
-					parsedURL, err := url.Parse(attURL)
-					if err != nil {
-						return status, err
-					}
-					if attType == "application" {
-						attType = "document"
-					}
-					media := whatsapp.Media{Link: parsedURL.String()}
-					if attType == "image" {
-						header.Params = append(header.Params, &whatsapp.Param{Type: "image", Image: &media})
-					} else if attType == "video" {
-						header.Params = append(header.Params, &whatsapp.Param{Type: "video", Video: &media})
-					} else if attType == "document" {
-						media.Filename, err = utils.BasePathForURL(attURL)
-						if err != nil {
-							return nil, err
-						}
-						header.Params = append(header.Params, &whatsapp.Param{Type: "document", Document: &media})
-					} else {
-						return nil, fmt.Errorf("unknown attachment mime type: %s", attType)
-					}
-					template.Components = append(payload.Template.Components, header)
-				}
-
-			} else {
-				if i < (len(msgParts) + len(msg.Attachments()) - 1) {
-					// this is still a msg part
-					text := &whatsapp.Text{PreviewURL: false}
-					payload.Type = "text"
-					if strings.Contains(msgParts[i-len(msg.Attachments())], "https://") || strings.Contains(msgParts[i-len(msg.Attachments())], "http://") {
-						text.PreviewURL = true
-					}
-					text.Body = msgParts[i-len(msg.Attachments())]
-					payload.Text = text
 				} else {
-					if len(qrs) > 0 {
-						payload.Type = "interactive"
-						// We can use buttons
-						if len(qrs) <= 3 {
-							interactive := whatsapp.Interactive{Type: "button", Body: struct {
-								Text string "json:\"text\""
-							}{Text: msgParts[i-len(msg.Attachments())]}}
-
-							btns := make([]whatsapp.Button, len(qrs))
-							for i, qr := range qrs {
-								btns[i] = whatsapp.Button{
-									Type: "reply",
-								}
-								btns[i].Reply.ID = fmt.Sprint(i)
-								var text string
-								if strings.Contains(qr, "\\/") {
-									text = strings.Replace(qr, "\\", "", -1)
-								} else if strings.Contains(qr, "\\\\") {
-									text = strings.Replace(qr, "\\\\", "\\", -1)
-								} else {
-									text = qr
-								}
-								btns[i].Reply.Title = text
-							}
-							interactive.Action = &struct {
-								Button   string             "json:\"button,omitempty\""
-								Sections []whatsapp.Section "json:\"sections,omitempty\""
-								Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
-							}{Buttons: btns}
-							payload.Interactive = &interactive
-						} else if len(qrs) <= 10 {
-							interactive := whatsapp.Interactive{Type: "list", Body: struct {
-								Text string "json:\"text\""
-							}{Text: msgParts[i-len(msg.Attachments())]}}
-
-							section := whatsapp.Section{
-								Rows: make([]whatsapp.SectionRow, len(qrs)),
-							}
-							for i, qr := range qrs {
-								var text string
-								if strings.Contains(qr, "\\/") {
-									text = strings.Replace(qr, "\\", "", -1)
-								} else if strings.Contains(qr, "\\\\") {
-									text = strings.Replace(qr, "\\\\", "\\", -1)
-								} else {
-									text = qr
-								}
-								section.Rows[i] = whatsapp.SectionRow{
-									ID:    fmt.Sprint(i),
-									Title: text,
-								}
-							}
-
-							interactive.Action = &struct {
-								Button   string             "json:\"button,omitempty\""
-								Sections []whatsapp.Section "json:\"sections,omitempty\""
-								Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
-							}{Button: menuButton, Sections: []whatsapp.Section{
-								section,
-							}}
-
-							payload.Interactive = &interactive
-						} else {
-							return nil, fmt.Errorf("too many quick replies WAC supports only up to 10 quick replies")
-						}
-					} else {
+					if i < (len(msgParts) + len(msg.Attachments()) - 1) {
 						// this is still a msg part
 						text := &whatsapp.Text{PreviewURL: false}
 						payload.Type = "text"
@@ -1118,245 +1003,275 @@ func (h *handler) sendWhatsAppMsg(ctx context.Context, msg courier.MsgOut, clog 
 						}
 						text.Body = msgParts[i-len(msg.Attachments())]
 						payload.Text = text
-					}
-				}
-			}
+					} else {
+						if len(qrs) > 0 {
+							payload.Type = "interactive"
 
-		} else if i < len(msg.Attachments()) && (len(qrs) == 0 || len(qrs) > 3) {
-			attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
-			attType = strings.Split(attType, "/")[0]
-			if attType == "application" {
-				attType = "document"
-			}
-			payload.Type = attType
-			media := whatsapp.Media{Link: attURL}
+							// if we have more than 10 quick replies, truncate and add channel error
+							if len(qrs) > 10 {
+								clog.Error(courier.NewChannelError("", "", "too many quick replies WAC supports only up to 10 quick replies"))
+								qrs = qrs[:10]
+							}
 
-			if len(msgParts) == 1 && attType != "audio" && len(msg.Attachments()) == 1 && len(msg.QuickReplies()) == 0 {
-				media.Caption = msgParts[i]
-				hasCaption = true
-			}
+							// We can use buttons
+							if len(qrs) <= 3 {
+								interactive := whatsapp.Interactive{Type: "button", Body: struct {
+									Text string "json:\"text\""
+								}{Text: msgParts[i-len(msg.Attachments())]}}
 
-			if attType == "image" {
-				payload.Image = &media
-			} else if attType == "audio" {
-				payload.Audio = &media
-			} else if attType == "video" {
-				payload.Video = &media
-			} else if attType == "document" {
-				filename, err := utils.BasePathForURL(attURL)
-				if err != nil {
-					filename = ""
-				}
-				if filename != "" {
-					media.Filename = filename
-				}
-				payload.Document = &media
-			}
-		} else {
-			if len(qrs) > 0 {
-				payload.Type = "interactive"
-				// We can use buttons
-				if len(qrs) <= 3 {
-					interactive := whatsapp.Interactive{Type: "button", Body: struct {
-						Text string "json:\"text\""
-					}{Text: msgParts[i]}}
+								btns := make([]whatsapp.Button, len(qrs))
+								for i, qr := range qrs {
+									btns[i] = whatsapp.Button{
+										Type: "reply",
+									}
+									btns[i].Reply.ID = fmt.Sprint(i)
+									btns[i].Reply.Title = qr
+								}
+								interactive.Action = &struct {
+									Button   string             "json:\"button,omitempty\""
+									Sections []whatsapp.Section "json:\"sections,omitempty\""
+									Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
+								}{Buttons: btns}
+								payload.Interactive = &interactive
+							} else {
+								interactive := whatsapp.Interactive{Type: "list", Body: struct {
+									Text string "json:\"text\""
+								}{Text: msgParts[i-len(msg.Attachments())]}}
 
-					if len(msg.Attachments()) > 0 {
-						hasCaption = true
-						attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
-						attType = strings.Split(attType, "/")[0]
-						if attType == "application" {
-							attType = "document"
-						}
-						if attType == "image" {
-							image := whatsapp.Media{
-								Link: attURL,
-							}
-							interactive.Header = &struct {
-								Type     string          "json:\"type\""
-								Text     string          "json:\"text,omitempty\""
-								Video    *whatsapp.Media "json:\"video,omitempty\""
-								Image    *whatsapp.Media "json:\"image,omitempty\""
-								Document *whatsapp.Media "json:\"document,omitempty\""
-							}{Type: "image", Image: &image}
-						} else if attType == "video" {
-							video := whatsapp.Media{
-								Link: attURL,
-							}
-							interactive.Header = &struct {
-								Type     string          "json:\"type\""
-								Text     string          "json:\"text,omitempty\""
-								Video    *whatsapp.Media "json:\"video,omitempty\""
-								Image    *whatsapp.Media "json:\"image,omitempty\""
-								Document *whatsapp.Media "json:\"document,omitempty\""
-							}{Type: "video", Video: &video}
-						} else if attType == "document" {
-							filename, err := utils.BasePathForURL(attURL)
-							if err != nil {
-								return nil, err
-							}
-							document := whatsapp.Media{
-								Link:     attURL,
-								Filename: filename,
-							}
-							interactive.Header = &struct {
-								Type     string          "json:\"type\""
-								Text     string          "json:\"text,omitempty\""
-								Video    *whatsapp.Media "json:\"video,omitempty\""
-								Image    *whatsapp.Media "json:\"image,omitempty\""
-								Document *whatsapp.Media "json:\"document,omitempty\""
-							}{Type: "document", Document: &document}
-						} else if attType == "audio" {
-							var zeroIndex bool
-							if i == 0 {
-								zeroIndex = true
-							}
-							payloadAudio = whatsapp.SendRequest{MessagingProduct: "whatsapp", RecipientType: "individual", To: msg.URN().Path(), Type: "audio", Audio: &whatsapp.Media{Link: attURL}}
-							_, err := h.requestWAC(payloadAudio, accessToken, status, wacPhoneURL, zeroIndex, clog)
-							if err != nil {
-								return status, nil
+								section := whatsapp.Section{
+									Rows: make([]whatsapp.SectionRow, len(qrs)),
+								}
+								for i, qr := range qrs {
+									section.Rows[i] = whatsapp.SectionRow{
+										ID:    fmt.Sprint(i),
+										Title: qr,
+									}
+								}
+
+								interactive.Action = &struct {
+									Button   string             "json:\"button,omitempty\""
+									Sections []whatsapp.Section "json:\"sections,omitempty\""
+									Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
+								}{Button: menuButton, Sections: []whatsapp.Section{
+									section,
+								}}
+
+								payload.Interactive = &interactive
 							}
 						} else {
-							interactive.Type = "button"
-							interactive.Body.Text = msgParts[i]
+							// this is still a msg part
+							text := &whatsapp.Text{PreviewURL: false}
+							payload.Type = "text"
+							if strings.Contains(msgParts[i-len(msg.Attachments())], "https://") || strings.Contains(msgParts[i-len(msg.Attachments())], "http://") {
+								text.PreviewURL = true
+							}
+							text.Body = msgParts[i-len(msg.Attachments())]
+							payload.Text = text
 						}
 					}
+				}
 
-					btns := make([]whatsapp.Button, len(qrs))
-					for i, qr := range qrs {
-						btns[i] = whatsapp.Button{
-							Type: "reply",
-						}
-						btns[i].Reply.ID = fmt.Sprint(i)
-						var text string
-						if strings.Contains(qr, "\\/") {
-							text = strings.Replace(qr, "\\", "", -1)
-						} else if strings.Contains(qr, "\\\\") {
-							text = strings.Replace(qr, "\\\\", "\\", -1)
-						} else {
-							text = qr
-						}
-						btns[i].Reply.Title = text
+			} else if i < len(msg.Attachments()) && (len(qrs) == 0 || len(qrs) > 3) {
+				attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
+				attType = strings.Split(attType, "/")[0]
+				if attType == "application" {
+					attType = "document"
+				}
+				payload.Type = attType
+				media := whatsapp.Media{Link: attURL}
+
+				if len(msgParts) == 1 && attType != "audio" && len(msg.Attachments()) == 1 && len(msg.QuickReplies()) == 0 {
+					media.Caption = msgParts[i]
+					hasCaption = true
+				}
+
+				if attType == "image" {
+					payload.Image = &media
+				} else if attType == "audio" {
+					payload.Audio = &media
+				} else if attType == "video" {
+					payload.Video = &media
+				} else if attType == "document" {
+					filename, err := utils.BasePathForURL(attURL)
+					if err != nil {
+						filename = ""
 					}
-					interactive.Action = &struct {
-						Button   string             "json:\"button,omitempty\""
-						Sections []whatsapp.Section "json:\"sections,omitempty\""
-						Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
-					}{Buttons: btns}
-					payload.Interactive = &interactive
-
-				} else if len(qrs) <= 10 {
-					interactive := whatsapp.Interactive{Type: "list", Body: struct {
-						Text string "json:\"text\""
-					}{Text: msgParts[i-len(msg.Attachments())]}}
-
-					section := whatsapp.Section{
-						Rows: make([]whatsapp.SectionRow, len(qrs)),
+					if filename != "" {
+						media.Filename = filename
 					}
-					for i, qr := range qrs {
-						var text string
-						if strings.Contains(qr, "\\/") {
-							text = strings.Replace(qr, "\\", "", -1)
-						} else if strings.Contains(qr, "\\\\") {
-							text = strings.Replace(qr, "\\\\", "\\", -1)
-						} else {
-							text = qr
-						}
-						section.Rows[i] = whatsapp.SectionRow{
-							ID:    fmt.Sprint(i),
-							Title: text,
-						}
-					}
-
-					interactive.Action = &struct {
-						Button   string             "json:\"button,omitempty\""
-						Sections []whatsapp.Section "json:\"sections,omitempty\""
-						Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
-					}{Button: menuButton, Sections: []whatsapp.Section{
-						section,
-					}}
-
-					payload.Interactive = &interactive
-				} else {
-					return nil, fmt.Errorf("too many quick replies WAC supports only up to 10 quick replies")
+					payload.Document = &media
 				}
 			} else {
-				// this is still a msg part
-				text := &whatsapp.Text{PreviewURL: false}
-				payload.Type = "text"
-				if strings.Contains(msgParts[i-len(msg.Attachments())], "https://") || strings.Contains(msgParts[i-len(msg.Attachments())], "http://") {
-					text.PreviewURL = true
+				if len(qrs) > 0 {
+					payload.Type = "interactive"
+
+					// if we have more than 10 quick replies, truncate and add channel error
+					if len(qrs) > 10 {
+						clog.Error(courier.NewChannelError("", "", "too many quick replies WAC supports only up to 10 quick replies"))
+						qrs = qrs[:10]
+					}
+
+					// We can use buttons
+					if len(qrs) <= 3 {
+						interactive := whatsapp.Interactive{Type: "button", Body: struct {
+							Text string "json:\"text\""
+						}{Text: msgParts[i]}}
+
+						if len(msg.Attachments()) > 0 {
+							hasCaption = true
+							attType, attURL := handlers.SplitAttachment(msg.Attachments()[i])
+							attType = strings.Split(attType, "/")[0]
+							if attType == "application" {
+								attType = "document"
+							}
+							if attType == "image" {
+								image := whatsapp.Media{
+									Link: attURL,
+								}
+								interactive.Header = &struct {
+									Type     string          "json:\"type\""
+									Text     string          "json:\"text,omitempty\""
+									Video    *whatsapp.Media "json:\"video,omitempty\""
+									Image    *whatsapp.Media "json:\"image,omitempty\""
+									Document *whatsapp.Media "json:\"document,omitempty\""
+								}{Type: "image", Image: &image}
+							} else if attType == "video" {
+								video := whatsapp.Media{
+									Link: attURL,
+								}
+								interactive.Header = &struct {
+									Type     string          "json:\"type\""
+									Text     string          "json:\"text,omitempty\""
+									Video    *whatsapp.Media "json:\"video,omitempty\""
+									Image    *whatsapp.Media "json:\"image,omitempty\""
+									Document *whatsapp.Media "json:\"document,omitempty\""
+								}{Type: "video", Video: &video}
+							} else if attType == "document" {
+								filename, err := utils.BasePathForURL(attURL)
+								if err != nil {
+									return err
+								}
+								document := whatsapp.Media{
+									Link:     attURL,
+									Filename: filename,
+								}
+								interactive.Header = &struct {
+									Type     string          "json:\"type\""
+									Text     string          "json:\"text,omitempty\""
+									Video    *whatsapp.Media "json:\"video,omitempty\""
+									Image    *whatsapp.Media "json:\"image,omitempty\""
+									Document *whatsapp.Media "json:\"document,omitempty\""
+								}{Type: "document", Document: &document}
+							} else if attType == "audio" {
+
+								payloadAudio = whatsapp.SendRequest{MessagingProduct: "whatsapp", RecipientType: "individual", To: msg.URN().Path(), Type: "audio", Audio: &whatsapp.Media{Link: attURL}}
+								err := h.requestWAC(payloadAudio, accessToken, res, wacPhoneURL, clog)
+								if err != nil {
+									return err
+								}
+							} else {
+								interactive.Type = "button"
+								interactive.Body.Text = msgParts[i]
+							}
+						}
+
+						btns := make([]whatsapp.Button, len(qrs))
+						for i, qr := range qrs {
+							btns[i] = whatsapp.Button{
+								Type: "reply",
+							}
+							btns[i].Reply.ID = fmt.Sprint(i)
+							btns[i].Reply.Title = qr
+						}
+						interactive.Action = &struct {
+							Button   string             "json:\"button,omitempty\""
+							Sections []whatsapp.Section "json:\"sections,omitempty\""
+							Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
+						}{Buttons: btns}
+						payload.Interactive = &interactive
+
+					} else {
+						interactive := whatsapp.Interactive{Type: "list", Body: struct {
+							Text string "json:\"text\""
+						}{Text: msgParts[i-len(msg.Attachments())]}}
+
+						section := whatsapp.Section{
+							Rows: make([]whatsapp.SectionRow, len(qrs)),
+						}
+						for i, qr := range qrs {
+							section.Rows[i] = whatsapp.SectionRow{
+								ID:    fmt.Sprint(i),
+								Title: qr,
+							}
+						}
+
+						interactive.Action = &struct {
+							Button   string             "json:\"button,omitempty\""
+							Sections []whatsapp.Section "json:\"sections,omitempty\""
+							Buttons  []whatsapp.Button  "json:\"buttons,omitempty\""
+						}{Button: menuButton, Sections: []whatsapp.Section{
+							section,
+						}}
+
+						payload.Interactive = &interactive
+					}
+				} else {
+					// this is still a msg part
+					text := &whatsapp.Text{PreviewURL: false}
+					payload.Type = "text"
+					if strings.Contains(msgParts[i-len(msg.Attachments())], "https://") || strings.Contains(msgParts[i-len(msg.Attachments())], "http://") {
+						text.PreviewURL = true
+					}
+					text.Body = msgParts[i-len(msg.Attachments())]
+					payload.Text = text
 				}
-				text.Body = msgParts[i-len(msg.Attachments())]
-				payload.Text = text
 			}
-		}
 
-		var zeroIndex bool
-		if i == 0 {
-			zeroIndex = true
-		}
-
-		respPayload, err := h.requestWAC(payload, accessToken, status, wacPhoneURL, zeroIndex, clog)
-		if err != nil {
-			return status, err
-		}
-
-		// if payload.contacts[0].wa_id != payload.contacts[0].input | to fix cases with 9 extra
-		if respPayload != nil && len(respPayload.Contacts) > 0 && respPayload.Contacts[0].WaID != msg.URN().Path() {
-			if !hasNewURN {
-				toUpdateURN, err := urns.NewWhatsAppURN(respPayload.Contacts[0].WaID)
-				if err != nil {
-					return status, nil
-				}
-				err = status.SetURNUpdate(msg.URN(), toUpdateURN)
-				if err != nil {
-					clog.Error(courier.ErrorResponseUnexpected("unable to update contact URN for a new based on wa_id"))
-				}
-				hasNewURN = true
+			err := h.requestWAC(payload, accessToken, res, wacPhoneURL, clog)
+			if err != nil {
+				return err
 			}
-		}
 
-		if hasTemplate && len(msg.Attachments()) > 0 || hasCaption {
-			break
+			if hasCaption {
+				break
+			}
 		}
 	}
-	return status, nil
+	return nil
 }
 
-func (h *handler) requestWAC(payload whatsapp.SendRequest, accessToken string, status courier.StatusUpdate, wacPhoneURL *url.URL, zeroIndex bool, clog *courier.ChannelLog) (*whatsapp.SendResponse, error) {
+func (h *handler) requestWAC(payload whatsapp.SendRequest, accessToken string, res *courier.SendResult, wacPhoneURL *url.URL, clog *courier.ChannelLog) error {
 	jsonBody := jsonx.MustMarshal(payload)
 
 	req, err := http.NewRequest(http.MethodPost, wacPhoneURL.String(), bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	_, respBody, _ := h.RequestHTTP(req, clog)
+	resp, respBody, err := h.RequestHTTP(req, clog)
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	}
+
 	respPayload := &whatsapp.SendResponse{}
 	err = json.Unmarshal(respBody, respPayload)
 	if err != nil {
-		clog.Error(courier.ErrorResponseUnparseable("JSON"))
-		return respPayload, nil
+		return courier.ErrResponseUnparseable
 	}
 
 	if respPayload.Error.Code != 0 {
-		clog.Error(courier.ErrorExternal(strconv.Itoa(respPayload.Error.Code), respPayload.Error.Message))
-		return respPayload, nil
+		return courier.ErrFailedWithReason(strconv.Itoa(respPayload.Error.Code), respPayload.Error.Message)
 	}
 
 	externalID := respPayload.Messages[0].ID
-	if zeroIndex && externalID != "" {
-		status.SetExternalID(externalID)
+	if externalID != "" {
+		res.AddExternalID(externalID)
 	}
-
-	// this was wired successfully
-	status.SetStatus(courier.MsgStatusWired)
-	return respPayload, nil
+	return nil
 }
 
 // DescribeURN looks up URN metadata for new contacts
@@ -1366,7 +1281,7 @@ func (h *handler) DescribeURN(ctx context.Context, channel courier.Channel, urn 
 	}
 
 	// can't do anything with facebook refs, ignore them
-	if urn.IsFacebookRef() {
+	if IsFacebookRef(urn) {
 		return map[string]string{}, nil
 	}
 

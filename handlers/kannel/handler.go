@@ -11,6 +11,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/gsm7"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 const (
@@ -68,7 +69,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	date := time.Unix(form.TS, 0).UTC()
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(form.Sender, channel.Country())
+	urn, err := urns.ParsePhone(form.Sender, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -119,23 +120,14 @@ func (h *handler) receiveStatus(ctx context.Context, channel courier.Channel, w 
 	// return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
+
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for KN channel")
-	}
-
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return nil, fmt.Errorf("no password set for KN channel")
-	}
-
 	sendURL := msg.Channel().StringConfigForKey(courier.ConfigSendURL, "")
-	if sendURL == "" {
-		return nil, fmt.Errorf("no send url set for KN channel")
+	if username == "" || password == "" || sendURL == "" {
+		return courier.ErrChannelConfig
 	}
-
 	dlrMask := msg.Channel().StringConfigForKey(configDLRMask, defaultDLRMask)
 
 	callbackDomain := msg.Channel().CallbackDomain(h.Server().Config().Domain)
@@ -161,8 +153,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	// if we are meant to use national formatting (no country code) pull that out
 	if useNational {
-		nationalTo := msg.URN().Localize(msg.Channel().Country())
-		form["to"] = []string{nationalTo.Path()}
+		form["to"] = []string{urns.ToLocalPhone(msg.URN(), msg.Channel().Country())}
 	}
 
 	// figure out what encoding to tell kannel to send as
@@ -198,7 +189,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	req, err := http.NewRequest(http.MethodGet, sendURL, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var resp *http.Response
@@ -208,15 +199,11 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		resp, _, err = h.RequestHTTPInsecure(req, clog)
 	}
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
-	if err == nil && resp.StatusCode/100 == 2 {
-		status.SetStatus(courier.MsgStatusWired)
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
-	// kannel will respond with a 403 for non-routable numbers, fail permanently in these cases
-	if resp != nil && resp.StatusCode == 403 {
-		status.SetStatus(courier.MsgStatusFailed)
-	}
-
-	return status, nil
+	return nil
 }

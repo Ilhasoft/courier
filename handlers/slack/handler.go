@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -16,7 +17,6 @@ import (
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 var apiURL = "https://slack.com/api"
@@ -75,7 +75,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 
 		date := time.Unix(int64(payload.EventTime), 0)
 
-		urn, err := urns.NewURNFromParts(urns.SlackScheme, payload.Event.User, "", "")
+		urn, err := urns.New(urns.Slack, payload.Event.User)
 		if err != nil {
 			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 		}
@@ -123,7 +123,7 @@ func (h *handler) resolveFile(ctx context.Context, channel courier.Channel, file
 
 	var fResponse FileResponse
 	if err := json.Unmarshal(respBody, &fResponse); err != nil {
-		return "", errors.Errorf("couldn't unmarshal file response: %v", err)
+		return "", fmt.Errorf("couldn't unmarshal file response: %v", err)
 	}
 
 	currentFile := fResponse.File
@@ -131,9 +131,9 @@ func (h *handler) resolveFile(ctx context.Context, channel courier.Channel, file
 	if !fResponse.OK {
 		if fResponse.Error != ErrAlreadyPublic {
 			if fResponse.Error == ErrPublicVideoNotAllowed {
-				return "", errors.Errorf("public sharing of videos is not available for a free instance of Slack. file id: %s. error: %s", file.ID, fResponse.Error)
+				return "", fmt.Errorf("public sharing of videos is not available for a free instance of Slack. file id: %s. error: %s", file.ID, fResponse.Error)
 			}
-			return "", errors.Errorf("couldn't resolve file for file id: %s. error: %s", file.ID, fResponse.Error)
+			return "", fmt.Errorf("couldn't resolve file for file id: %s. error: %s", file.ID, fResponse.Error)
 		}
 		currentFile = file
 	}
@@ -145,26 +145,22 @@ func (h *handler) resolveFile(ctx context.Context, channel courier.Channel, file
 	return filePath, nil
 }
 
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	botToken := msg.Channel().StringConfigForKey(configBotToken, "")
 	if botToken == "" {
-		return nil, fmt.Errorf("missing bot token for SL/slack channel")
+		return courier.ErrChannelConfig
 	}
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	for _, attachment := range msg.Attachments() {
 		fileAttachment, err := h.parseAttachmentToFileParams(msg, attachment, clog)
 		if err != nil {
-			clog.RawError(err)
-			return status, nil
+			return err
 		}
 
 		if fileAttachment != nil {
 			err = h.sendFilePart(msg, botToken, fileAttachment, clog)
 			if err != nil {
-				clog.RawError(err)
-				return status, nil
+				return err
 			}
 		}
 	}
@@ -173,20 +169,18 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		_, err := h.sendQuickReplies(msg, botToken, clog)
 		if err != nil {
 			clog.RawError(err)
-			return status, nil
+			return err
 		}
 	}
 
 	if msg.Text() != "" {
 		err := h.sendTextMsgPart(msg, botToken, clog)
 		if err != nil {
-			clog.RawError(err)
-			return status, nil
+			return err
 		}
 	}
 
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	return nil
 }
 
 func (h *handler) sendTextMsgPart(msg courier.MsgOut, token string, clog *courier.ChannelLog) error {
@@ -211,20 +205,23 @@ func (h *handler) sendTextMsgPart(msg courier.MsgOut, token string, clog *courie
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
 	if err != nil || resp.StatusCode/100 != 2 {
-		return errors.New("error sending message")
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	ok, err := jsonparser.GetBoolean(respBody, "ok")
 	if err != nil {
-		return err
+		return courier.ErrResponseUnexpected
 	}
 
 	if !ok {
 		errDescription, err := jsonparser.GetString(respBody, "error")
 		if err != nil {
-			return err
+			return courier.ErrResponseUnexpected
 		}
-		return errors.New(errDescription)
+		clog.Error(courier.NewChannelError("", "", errDescription))
+		return courier.ErrFailedWithReason("", errDescription)
 	}
 	return nil
 }
@@ -234,7 +231,7 @@ func (h *handler) parseAttachmentToFileParams(msg courier.MsgOut, attachment str
 
 	req, err := http.NewRequest(http.MethodGet, attURL, nil)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error building file request")
+		return nil, fmt.Errorf("error building file request: %w", err)
 	}
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
@@ -256,19 +253,19 @@ func (h *handler) sendFilePart(msg courier.MsgOut, token string, fileParams *Fil
 	writer := multipart.NewWriter(body)
 	mediaPart, err := writer.CreateFormFile("file", fileParams.FileName)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create file form field")
+		return fmt.Errorf("failed to create file form field: %w", err)
 	}
 	io.Copy(mediaPart, bytes.NewReader(fileParams.File))
 
 	filenamePart, err := writer.CreateFormField("filename")
 	if err != nil {
-		return errors.Wrapf(err, "failed to create filename form field")
+		return fmt.Errorf("failed to create filename form field: %w", err)
 	}
 	io.Copy(filenamePart, strings.NewReader(fileParams.FileName))
 
 	channelsPart, err := writer.CreateFormField("channels")
 	if err != nil {
-		return errors.Wrapf(err, "failed to create channels form field")
+		return fmt.Errorf("failed to create channels form field: %w", err)
 	}
 	io.Copy(channelsPart, strings.NewReader(fileParams.Channels))
 
@@ -276,23 +273,25 @@ func (h *handler) sendFilePart(msg courier.MsgOut, token string, fileParams *Fil
 
 	req, err := http.NewRequest(http.MethodPost, uploadURL, bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return errors.Wrapf(err, "error building request to file upload endpoint")
+		return fmt.Errorf("error building request to file upload endpoint: %w", err)
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	req.Header.Add("Content-Type", writer.FormDataContentType())
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
 	if err != nil || resp.StatusCode/100 != 2 {
-		return errors.New("error uploading file to slack")
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	var fr FileResponse
 	if err := json.Unmarshal(respBody, &fr); err != nil {
-		return errors.Errorf("couldn't unmarshal file response: %v", err)
+		return courier.ErrResponseUnparseable
 	}
 
 	if !fr.OK {
-		return errors.Errorf("error uploading file to slack: %s.", fr.Error)
+		return courier.ErrResponseUnexpected
 	}
 
 	return nil

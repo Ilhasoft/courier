@@ -9,6 +9,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
 	"github.com/stretchr/testify/assert"
 )
@@ -25,7 +26,7 @@ func TestChannelLog(t *testing.T) {
 	uuids.SetGenerator(uuids.NewSeededGenerator(1234))
 	defer uuids.SetGenerator(uuids.DefaultGenerator)
 
-	channel := test.NewMockChannel("fef91e9b-a6ed-44fb-b6ce-feed8af585a8", "NX", "1234", "US", nil)
+	channel := test.NewMockChannel("fef91e9b-a6ed-44fb-b6ce-feed8af585a8", "NX", "1234", "US", []string{urns.Phone.Prefix}, nil)
 	clog := courier.NewChannelLog(courier.ChannelLogTypeTokenRefresh, channel, nil)
 
 	// make a request that will have a response
@@ -109,19 +110,14 @@ func TestChannelErrors(t *testing.T) {
 			expectedMessage: "Unable to find 'id' response.",
 		},
 		{
-			err:             courier.ErrorResponseValueUnexpected("status", "SUCCESS"),
-			expectedCode:    "response_value_unexpected",
-			expectedMessage: "Expected 'status' in response to be 'SUCCESS'.",
-		},
-		{
-			err:             courier.ErrorResponseValueUnexpected("status", "SUCCESS", "OK"),
-			expectedCode:    "response_value_unexpected",
-			expectedMessage: "Expected 'status' in response to be 'SUCCESS' or 'OK'.",
-		},
-		{
 			err:             courier.ErrorMediaUnsupported("image/tiff"),
 			expectedCode:    "media_unsupported",
 			expectedMessage: "Unsupported attachment media type: image/tiff.",
+		},
+		{
+			err:             courier.ErrorMediaUnresolveable("image/jpeg"),
+			expectedCode:    "media_unresolveable",
+			expectedMessage: "Unable to find version of image/jpeg attachment compatible with channel.",
 		},
 		{
 			err:             courier.ErrorAttachmentNotDecodable(),

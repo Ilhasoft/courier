@@ -1,22 +1,18 @@
 package mtn
 
 import (
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "MTN", "2020", "US", map[string]any{courier.ConfigAuthToken: "customer-secret123", courier.ConfigAPIKey: "customer-key"}),
-}
 
 var (
 	receiveURL = "/c/mtn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive"
-	statusURL  = "/c/mtn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/status"
 )
 
 var helloMsg = `{
@@ -79,7 +75,7 @@ var missingTransactionID = `{
 	"deliveryStatus": "EXPIRED"
 }`
 
-var testCases = []IncomingTestCase{
+var incomingCases = []IncomingTestCase{
 	{
 		Label:                "Receive Valid Message",
 		URL:                  receiveURL,
@@ -95,7 +91,7 @@ var testCases = []IncomingTestCase{
 		URL:                  receiveURL,
 		Data:                 invalidURN,
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	{
 		Label:                "Receive Valid Status",
@@ -151,70 +147,109 @@ var testCases = []IncomingTestCase{
 }
 
 func TestIncoming(t *testing.T) {
-	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "MTN", "2020", "US", []string{urns.Phone.Prefix}, map[string]any{courier.ConfigAuthToken: "customer-secret123", courier.ConfigAPIKey: "customer-key"}),
+	}
+
+	RunIncomingTestCases(t, chs, newHandler(), incomingCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
+var outgoingCases = []OutgoingTestCase{
+	{
+		Label:   "Plain Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.mtn.com/v2/messages/sms/outbound": {
+				httpx.NewMockResponse(201, nil, []byte(`{ "transactionId":"OzYDlvf3SQVc" }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ACCESS_TOKEN",
+			},
+			Body: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"Simple Message ☺","clientCorrelator":"10"}`,
+		}},
+		ExpectedExtIDs: []string{"OzYDlvf3SQVc"},
+	},
+	{
+		Label:          "Send Attachment",
+		MsgText:        "My pic!",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.mtn.com/v2/messages/sms/outbound": {
+				httpx.NewMockResponse(201, nil, []byte(`{ "transactionId":"OzYDlvf3SQVc" }`)),
+			},
+		},
+
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ACCESS_TOKEN",
+			},
+			Body: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"My pic!\nhttps://foo.bar/image.jpg","clientCorrelator":"10"}`,
+		}},
+		ExpectedExtIDs: []string{"OzYDlvf3SQVc"},
+	},
+	{
+		Label:   "No External Id",
+		MsgText: "No External ID",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.mtn.com/v2/messages/sms/outbound": {
+				httpx.NewMockResponse(200, nil, []byte(`{"statusCode":"0000"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ACCESS_TOKEN",
+			},
+			Body: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"No External ID","clientCorrelator":"10"}`,
+		}},
+		ExpectedLogErrors: []*courier.ChannelError{courier.ErrorResponseValueMissing("transactionId")},
+	},
+	{
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.mtn.com/v2/messages/sms/outbound": {
+				httpx.NewMockResponse(401, nil, []byte(`{ "error": "failed" }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Body: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"Error Message","clientCorrelator":"10"}`,
+		}},
+		ExpectedError: courier.ErrResponseStatus,
+	},
 }
 
-// setSendURL takes care of setting the sendURL to call
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	apiHostURL = s.URL
-}
-
-var defaultSendTestCases = []OutgoingTestCase{
-	{Label: "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "OzYDlvf3SQVc",
-		MockResponseBody:   `{ "transactionId":"OzYDlvf3SQVc" }`,
-		MockResponseStatus: 201,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
+var cpAddressOutgoingCases = []OutgoingTestCase{
+	{
+		Label:   "Plain Send",
+		MsgText: "Simple Message ☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.mtn.com/v2/messages/sms/outbound": {
+				httpx.NewMockResponse(201, nil, []byte(`{ "transactionId":"OzYDlvf3SQVc" }`)),
+			},
 		},
-		ExpectedRequestBody: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"Simple Message ☺","clientCorrelator":"10"}`,
-		SendPrep:            setSendURL},
-	{Label: "Send Attachment",
-		MsgText:            "My pic!",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "OzYDlvf3SQVc",
-		MockResponseBody:   `{ "transactionId":"OzYDlvf3SQVc" }`,
-		MockResponseStatus: 200,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
-		},
-		ExpectedRequestBody: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"My pic!\nhttps://foo.bar/image.jpg","clientCorrelator":"10"}`,
-		SendPrep:            setSendURL},
-	{Label: "No External Id",
-		MsgText:            "No External ID",
-		MsgURN:             "tel:+250788383383",
-		ExpectedMsgStatus:  "E",
-		MockResponseBody:   `{"statusCode":"0000"}`,
-		MockResponseStatus: 200,
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("transactionId")},
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
-		},
-		ExpectedRequestBody: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"No External ID","clientCorrelator":"10"}`,
-		SendPrep:            setSendURL},
-	{Label: "Error Sending",
-		MsgText:             "Error Message",
-		MsgURN:              "tel:+250788383383",
-		ExpectedMsgStatus:   "E",
-		MockResponseBody:    `{ "error": "failed" }`,
-		MockResponseStatus:  401,
-		ExpectedRequestBody: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"Error Message","clientCorrelator":"10"}`,
-		SendPrep:            setSendURL},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ACCESS_TOKEN",
+			},
+			Body: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"Simple Message ☺","clientCorrelator":"10","cpAddress":"FOO"}`,
+		}},
+		ExpectedExtIDs: []string{"OzYDlvf3SQVc"},
+	},
 }
 
 func setupBackend(mb *test.MockBackend) {
@@ -224,26 +259,10 @@ func setupBackend(mb *test.MockBackend) {
 	rc.Do("SET", "channel-token:8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "ACCESS_TOKEN")
 }
 
-var cpAddressSendTestCases = []OutgoingTestCase{
-	{Label: "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "OzYDlvf3SQVc",
-		MockResponseBody:   `{ "transactionId":"OzYDlvf3SQVc" }`,
-		MockResponseStatus: 201,
-		ExpectedHeaders: map[string]string{
-			"Content-Type":  "application/json",
-			"Accept":        "application/json",
-			"Authorization": "Bearer ACCESS_TOKEN",
-		},
-		ExpectedRequestBody: `{"senderAddress":"2020","receiverAddress":["250788383383"],"message":"Simple Message ☺","clientCorrelator":"10","cpAddress":"FOO"}`,
-		SendPrep:            setSendURL},
-}
-
 func TestOutgoing(t *testing.T) {
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "MTN", "2020", "US", map[string]any{courier.ConfigAuthToken: "customer-secret123", courier.ConfigAPIKey: "customer-key"})
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{"customer-key", "customer-secret123"}, setupBackend)
-	var cpAddressChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "MTN", "2020", "US", map[string]any{courier.ConfigAuthToken: "customer-secret123", courier.ConfigAPIKey: "customer-key", configCPAddress: "FOO"})
-	RunOutgoingTestCases(t, cpAddressChannel, newHandler(), cpAddressSendTestCases, []string{"customer-key", "customer-secret123"}, setupBackend)
+	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "MTN", "2020", "US", []string{urns.Phone.Prefix}, map[string]any{courier.ConfigAuthToken: "customer-secret123", courier.ConfigAPIKey: "customer-key"})
+	RunOutgoingTestCases(t, defaultChannel, newHandler(), outgoingCases, []string{"customer-key", "customer-secret123"}, setupBackend)
+
+	var cpAddressChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "MTN", "2020", "US", []string{urns.Phone.Prefix}, map[string]any{courier.ConfigAuthToken: "customer-secret123", courier.ConfigAPIKey: "customer-key", configCPAddress: "FOO"})
+	RunOutgoingTestCases(t, cpAddressChannel, newHandler(), cpAddressOutgoingCases, []string{"customer-key", "customer-secret123"}, setupBackend)
 }

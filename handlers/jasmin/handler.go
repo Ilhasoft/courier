@@ -12,6 +12,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/gsm7"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var idRegex = regexp.MustCompile(`Success \"(.*)\"`)
@@ -82,7 +83,7 @@ func (h *handler) receiveMessage(ctx context.Context, c courier.Channel, w http.
 	}
 
 	// create our URN
-	urn, err := handlers.StrictTelForCountry(form.From, c.Country())
+	urn, err := urns.ParsePhone(form.From, c.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, c, w, r, err)
 	}
@@ -118,21 +119,12 @@ func writeJasminACK(w http.ResponseWriter) error {
 	return err
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for JS channel")
-	}
-
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return nil, fmt.Errorf("no password set for JS channel")
-	}
-
 	sendURL := msg.Channel().StringConfigForKey(courier.ConfigSendURL, "")
-	if sendURL == "" {
-		return nil, fmt.Errorf("no send url set for JS channel")
+	if username == "" || password == "" || sendURL == "" {
+		return courier.ErrChannelConfig
 	}
 
 	callbackDomain := msg.Channel().CallbackDomain(h.Server().Config().Domain)
@@ -157,23 +149,21 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	req, err := http.NewRequest(http.MethodGet, fullURL.String(), nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
-
-	status.SetStatus(courier.MsgStatusWired)
 
 	// try to read our external id out
 	matches := idRegex.FindSubmatch(respBody)
 	if len(matches) == 2 {
-		status.SetExternalID(string(matches[1]))
+		res.AddExternalID(string(matches[1]))
 	}
 
-	return status, nil
+	return nil
 }

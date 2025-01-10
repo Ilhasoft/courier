@@ -16,7 +16,7 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
-	"github.com/pkg/errors"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -80,7 +80,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		clog.SetType(courier.ChannelLogTypeMsgReceive)
 
 		date := time.Unix(payload.Created/1000, payload.Created%1000*1000000).UTC()
-		urn, err := handlers.StrictTelForCountry(payload.From, channel.Country())
+		urn, err := urns.ParsePhone(payload.From, channel.Country(), true, false)
 		if err != nil {
 			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 		}
@@ -120,18 +120,15 @@ type mtPayload struct {
 	CPAddress        string   `json:"cpAddress,omitempty"`
 }
 
-// Send implements courier.ChannelHandler
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	accessToken, err := h.getAccessToken(ctx, msg.Channel(), clog)
 	if err != nil {
-		return nil, err
+		return courier.ErrChannelConfig
 	}
 
 	baseURL := msg.Channel().StringConfigForKey(configAPIHost, apiHostURL)
 	cpAddress := msg.Channel().StringConfigForKey(configCPAddress, "")
 	partSendURL, _ := url.Parse(fmt.Sprintf("%s/%s", baseURL, "v2/messages/sms/outbound"))
-
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 
 	mtMsg := &mtPayload{}
 	mtMsg.From = strings.TrimPrefix(msg.Channel().Address(), "+")
@@ -148,29 +145,27 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	// build our request
 	req, err := http.NewRequest(http.MethodPost, partSendURL.String(), requestBody)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	externalID, err := jsonparser.GetString(respBody, "transactionId")
 	if err != nil {
 		clog.Error(courier.ErrorResponseValueMissing("transactionId"))
-		return status, nil
+	} else {
+		res.AddExternalID(externalID)
 	}
 
-	// if this is our first message, record the external id
-
-	status.SetExternalID(externalID)
-	status.SetStatus(courier.MsgStatusWired)
-
-	return status, nil
+	return nil
 }
 
 func (h *handler) RedactValues(ch courier.Channel) []string {
@@ -191,7 +186,7 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 
 	token, err := redis.String(rc.Do("GET", tokenKey))
 	if err != nil && err != redis.ErrNil {
-		return "", errors.Wrap(err, "error reading cached access token")
+		return "", fmt.Errorf("error reading cached access token: %w", err)
 	}
 
 	if token != "" {
@@ -200,12 +195,12 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 
 	token, expires, err := h.fetchAccessToken(ctx, channel, clog)
 	if err != nil {
-		return "", errors.Wrap(err, "error fetching new access token")
+		return "", fmt.Errorf("error fetching new access token: %w", err)
 	}
 
 	_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
 	if err != nil {
-		return "", errors.Wrap(err, "error updating cached access token")
+		return "", fmt.Errorf("error updating cached access token: %w", err)
 	}
 
 	return token, nil

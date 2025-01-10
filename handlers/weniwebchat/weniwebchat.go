@@ -70,7 +70,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 	}
 
 	// build urn
-	urn, err := urns.NewURNFromParts(urns.ExternalScheme, payload.From, "", "")
+	urn, err := urns.NewFromParts(urns.External.Prefix, payload.From, nil, "")
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -120,12 +120,12 @@ type moMessage struct {
 	QuickReplies []string `json:"quick_replies,omitempty"`
 }
 
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusSent, clog)
 
 	baseURL := msg.Channel().StringConfigForKey(courier.ConfigBaseURL, "")
 	if baseURL == "" {
-		return status, errors.New("blank base_url")
+		return errors.New("blank base_url")
 	}
 
 	sendURL := fmt.Sprintf("%s/send", baseURL)
@@ -219,7 +219,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	}
 
-	return status, nil
+	return nil
 }
 
 func newOutgoingMessage(payType, to, from string, quickReplies []string) *moPayload {

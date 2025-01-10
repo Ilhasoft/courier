@@ -42,6 +42,8 @@ type OptInReference struct {
 	Name string `json:"name" validate:"required"`
 }
 
+type UserID int
+
 type MsgOrigin string
 
 const (
@@ -50,6 +52,27 @@ const (
 	MsgOriginTicket    MsgOrigin = "ticket"
 	MsgOriginChat      MsgOrigin = "chat"
 )
+
+type TemplatingVariable struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type Templating struct {
+	Template struct {
+		Name string `json:"name" validate:"required"`
+		UUID string `json:"uuid" validate:"required"`
+	} `json:"template" validate:"required,dive"`
+	Namespace  string `json:"namespace"`
+	Components []struct {
+		Type      string         `json:"type"`
+		Name      string         `json:"name"`
+		Variables map[string]int `json:"variables"`
+	} `json:"components"`
+	Variables  []TemplatingVariable `json:"variables"`
+	Language   string               `json:"language"`
+	ExternalID string               `json:"external_id"`
+}
 
 //-----------------------------------------------------------------------------
 // Msg interface
@@ -75,6 +98,7 @@ type MsgOut interface {
 	// outgoing specific
 	QuickReplies() []string
 	Locale() i18n.Locale
+	Templating() *Templating
 	URNAuth() string
 	Origin() MsgOrigin
 	ContactLastSeenOn() *time.Time
@@ -85,6 +109,7 @@ type MsgOut interface {
 	IsResend() bool
 	Flow() *FlowReference
 	OptIn() *OptInReference
+	UserID() UserID
 	SessionStatus() string
 	HighPriority() bool
 }

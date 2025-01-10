@@ -1,13 +1,16 @@
 package hormuud
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"fmt"
+	"net/url"
 	"testing"
 
+	"github.com/gomodule/redigo/redis"
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -21,7 +24,7 @@ var (
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "HM", "2020", "US", nil),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "HM", "2020", "US", []string{urns.Phone.Prefix}, nil),
 }
 
 var handleTestCases = []IncomingTestCase{
@@ -55,7 +58,7 @@ var handleTestCases = []IncomingTestCase{
 		URL:                  receiveInvalidURN,
 		Data:                 "empty",
 		ExpectedRespStatus:   400,
-		ExpectedBodyContains: "phone number supplied is not a number",
+		ExpectedBodyContains: "not a possible number",
 	},
 	//	{Label: "Status No Params", URL: statusNoParams, Status: 400, Response: "field 'status' required"},
 	//	{Label: "Status Invalid Status", URL: statusInvalidStatus, Status: 400, Response: "unknown status '66', must be one of 1,2,4,8,16"},
@@ -66,92 +69,155 @@ func TestIncoming(t *testing.T) {
 	RunIncomingTestCases(t, testChannels, newHandler(), handleTestCases)
 }
 
-// setSendURL takes care of setting the send_url to our test server host
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
 var sendTestCases = []OutgoingTestCase{
 	{
-		Label:               "Plain Send",
-		MsgText:             "Simple Message",
-		MsgURN:              "tel:+250788383383",
-		MockResponseBody:    `{"ResCode": "res", "ResMsg": "msg", "Data": { "MessageID": "msg1", "Description": "accepted" } }`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"mobile":"250788383383","message":"Simple Message","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "msg1",
-		SendPrep:            setSendURL,
+		Label:   "Plain Send",
+		MsgText: "Simple Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi.hormuud.com/token": {
+				httpx.NewMockResponse(200, nil, []byte(`{"access_token": "ghK_Wt4lshZhN"}`)),
+			},
+			"https://smsapi.hormuud.com/api/SendSMS": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ResCode": "res", "ResMsg": "msg", "Data": { "MessageID": "msg1", "Description": "accepted" } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"Username":   {"foo@bar.com"},
+					"Password":   {"sesame"},
+					"grant_type": {"password"},
+				},
+			},
+			{
+				Headers: map[string]string{
+					"Content-Type":  "application/json",
+					"Accept":        "application/json",
+					"Authorization": "Bearer ghK_Wt4lshZhN",
+				},
+				Body: `{"mobile":"250788383383","message":"Simple Message","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
+			},
+		},
+		ExpectedExtIDs: []string{"msg1"},
 	},
 	{
-		Label:               "Unicode Send",
-		MsgText:             "☺",
-		MsgURN:              "tel:+250788383383",
-		MockResponseBody:    `{"ResCode": "res", "ResMsg": "msg", "Data": { "MessageID": "msg1", "Description": "accepted" } }`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"mobile":"250788383383","message":"☺","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "msg1",
-		SendPrep:            setSendURL,
+		Label:   "Unicode Send",
+		MsgText: "☺",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi.hormuud.com/api/SendSMS": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ResCode": "res", "ResMsg": "msg", "Data": { "MessageID": "msg1", "Description": "accepted" } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ghK_Wt4lshZhN",
+			},
+			Body: `{"mobile":"250788383383","message":"☺","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
+		}},
+		ExpectedExtIDs: []string{"msg1"},
 	},
 	{
-		Label:               "Send Attachment",
-		MsgText:             "My pic!",
-		MsgURN:              "tel:+250788383383",
-		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:    `{"ResCode": "res", "ResMsg": "msg", "Data": { "MessageID": "msg1", "Description": "accepted" } }`,
-		MockResponseStatus:  200,
-		ExpectedRequestBody: `{"mobile":"250788383383","message":"My pic!\nhttps://foo.bar/image.jpg","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
-		ExpectedMsgStatus:   "W",
-		ExpectedExternalID:  "msg1",
-		SendPrep:            setSendURL,
+		Label:          "Send Attachment",
+		MsgText:        "My pic!",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi.hormuud.com/api/SendSMS": {
+				httpx.NewMockResponse(200, nil, []byte(`{"ResCode": "res", "ResMsg": "msg", "Data": { "MessageID": "msg1", "Description": "accepted" } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ghK_Wt4lshZhN",
+			},
+			Body: `{"mobile":"250788383383","message":"My pic!\nhttps://foo.bar/image.jpg","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
+		}},
+		ExpectedExtIDs: []string{"msg1"},
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Sending",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `[{"Response": "101"}]`,
-		MockResponseStatus: 403,
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error Sending",
+		MsgText: "Error Sending",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi.hormuud.com/api/SendSMS": {
+				httpx.NewMockResponse(403, nil, []byte(`[{"Response": "101"}]`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ghK_Wt4lshZhN",
+			},
+			Body: `{"mobile":"250788383383","message":"Error Sending","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
+		}},
+		ExpectedError: courier.ErrResponseStatus,
+	},
+	{
+		Label:   "Connection Error",
+		MsgText: "Error",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi.hormuud.com/api/SendSMS": {
+				httpx.NewMockResponse(500, nil, []byte(`[{"Response": "101"}]`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Headers: map[string]string{
+				"Content-Type":  "application/json",
+				"Accept":        "application/json",
+				"Authorization": "Bearer ghK_Wt4lshZhN",
+			},
+			Body: `{"mobile":"250788383383","message":"Error","senderid":"2020","mType":-1,"eType":-1,"UDH":""}`,
+		}},
+		ExpectedError: courier.ErrConnectionFailed,
 	},
 }
 
 var tokenTestCases = []OutgoingTestCase{
 	{
-		Label:             "Plain Send",
-		MsgText:           "Simple Message",
-		MsgURN:            "tel:+250788383383",
-		ExpectedMsgStatus: "E",
-		SendPrep:          setSendURL,
+		Label:   "Error getting token",
+		MsgText: "Simple Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://smsapi.hormuud.com/token": {
+				httpx.NewMockResponse(400, nil, []byte(`{"error": "invalid password"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"Username":   {"foo@bar.com"},
+					"Password":   {"sesame"},
+					"grant_type": {"password"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrResponseStatus,
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	// set up a token server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("valid") == "true" {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"access_token": "ghK_Wt4lshZhN"}`))
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error": "invalid password"}`))
-	}))
-	defer server.Close()
-
-	tokenURL = server.URL + "?valid=true"
-
 	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "HM", "2020", "US",
+		[]string{urns.Phone.Prefix},
 		map[string]any{
 			"username": "foo@bar.com",
 			"password": "sesame",
 		},
 	)
 
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), sendTestCases, []string{"sesame"}, nil)
+	h := newHandler()
+	RunOutgoingTestCases(t, defaultChannel, h, sendTestCases, []string{"sesame"}, nil)
 
-	tokenURL = server.URL + "?invalid=true"
+	conn := h.(*handler).Backend().RedisPool().Get()
+	redis.String(conn.Do("DEL", fmt.Sprintf("hm_token_%s", defaultChannel.UUID())))
+	defer conn.Close()
 
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), tokenTestCases, []string{"sesame"}, nil)
+	RunOutgoingTestCases(t, defaultChannel, h, tokenTestCases, []string{"sesame"}, nil)
 }

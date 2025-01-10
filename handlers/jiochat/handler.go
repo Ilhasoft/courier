@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -20,7 +21,6 @@ import (
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -115,9 +115,9 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	date := time.Unix(payload.CreateTime/1000, payload.CreateTime%1000*1000000).UTC()
-	urn, err := urns.NewURNFromParts(urns.JiochatScheme, payload.FromUsername, "", "")
+	urn, err := urns.New(urns.JioChat, payload.FromUsername)
 	if err != nil {
-		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, errors.New("invalid jiochat id"))
 	}
 
 	// subscribe event, trigger a new conversation
@@ -162,14 +162,12 @@ type mtPayload struct {
 	} `json:"text"`
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	accessToken, err := h.getAccessToken(ctx, msg.Channel(), clog)
 	if err != nil {
-		return nil, err
+		return courier.ErrChannelConfig
 	}
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
 	parts := handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
 	for _, part := range parts {
 		jcMsg := &mtPayload{}
@@ -187,14 +185,15 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 
 		resp, _, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 != 2 {
-			return status, nil
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
 		}
 
-		status.SetStatus(courier.MsgStatusWired)
 	}
 
-	return status, nil
+	return nil
 }
 
 // DescribeURN handles Jiochat contact details
@@ -262,7 +261,7 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 
 	token, err := redis.String(rc.Do("GET", tokenKey))
 	if err != nil && err != redis.ErrNil {
-		return "", errors.Wrap(err, "error reading cached access token")
+		return "", fmt.Errorf("error reading cached access token: %w", err)
 	}
 
 	if token != "" {
@@ -271,12 +270,12 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 
 	token, expires, err := h.fetchAccessToken(ctx, channel, clog)
 	if err != nil {
-		return "", errors.Wrap(err, "error fetching new access token")
+		return "", fmt.Errorf("error fetching new access token: %w", err)
 	}
 
 	_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
 	if err != nil {
-		return "", errors.Wrap(err, "error updating cached access token")
+		return "", fmt.Errorf("error updating cached access token: %w", err)
 	}
 
 	return token, nil

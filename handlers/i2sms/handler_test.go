@@ -1,7 +1,6 @@
 package i2sms
 
 import (
-	"net/http/httptest"
 	"net/url"
 	"testing"
 
@@ -9,10 +8,11 @@ import (
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "I2", "2020", "US", nil),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "I2", "2020", "US", []string{urns.Phone.Prefix}, nil),
 }
 
 const (
@@ -46,18 +46,17 @@ func BenchmarkHandler(b *testing.B) {
 	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
 }
 
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
 var defaultSendTestCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{"result":{"session_id":"5b8fc97d58795484819426"}, "error_code": "00", "error_desc": "Success"}`,
-		MockResponseStatus: 200,
+		Label:          "Plain Send",
+		MsgText:        "Simple Message ☺",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://mx2.i2sms.net/mxapi.php": {
+				httpx.NewMockResponse(200, nil, []byte(`{"result":{"session_id":"5b8fc97d58795484819426"}, "error_code": "00", "error_desc": "Success"}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Form: url.Values{
@@ -68,43 +67,76 @@ var defaultSendTestCases = []OutgoingTestCase{
 				},
 			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "5b8fc97d58795484819426",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"5b8fc97d58795484819426"},
 	},
 	{
-		Label:              "Invalid JSON",
-		MsgText:            "Invalid XML",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `not json`,
-		MockResponseStatus: 200,
-		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
-		SendPrep:           setSendURL,
+		Label:   "Invalid JSON",
+		MsgText: "Invalid XML",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://mx2.i2sms.net/mxapi.php": {
+				httpx.NewMockResponse(200, nil, []byte(`not json`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"action":  {"send_single"},
+					"mobile":  {"250788383383"},
+					"message": {"Invalid XML"},
+					"channel": {"hash123"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrResponseUnparseable,
 	},
 	{
-		Label:              "Error Response",
-		MsgText:            "Error Response",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{"result":{}, "error_code": "10", "error_desc": "Failed"}`,
-		MockResponseStatus: 200,
-		ExpectedMsgStatus:  "F",
-		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueUnexpected("error_code", "00")},
-		SendPrep:           setSendURL,
+		Label:   "Error Response",
+		MsgText: "Error Response",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://mx2.i2sms.net/mxapi.php": {
+				httpx.NewMockResponse(200, nil, []byte(`{"result":{}, "error_code": "10", "error_desc": "Failed"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"action":  {"send_single"},
+					"mobile":  {"250788383383"},
+					"message": {"Error Response"},
+					"channel": {"hash123"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrFailedWithReason("10", "Failed"),
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `Bad Gateway`,
-		MockResponseStatus: 501,
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://mx2.i2sms.net/mxapi.php": {
+				httpx.NewMockResponse(501, nil, []byte(`Bad Gateway`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Form: url.Values{
+					"action":  {"send_single"},
+					"mobile":  {"250788383383"},
+					"message": {"Error Message"},
+					"channel": {"hash123"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrConnectionFailed,
 	},
 }
 
 func TestOutgoing(t *testing.T) {
 	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "I2", "2020", "US",
+		[]string{urns.Phone.Prefix},
 		map[string]any{
 			courier.ConfigUsername: "user1",
 			courier.ConfigPassword: "pass1",

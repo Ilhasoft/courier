@@ -13,6 +13,7 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var sendURL = "https://api.infobip.com/sms/1/text/advanced"
@@ -140,7 +141,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 		}
 
 		// create our URN
-		urn, err := handlers.StrictTelForCountry(infobipMessage.From, channel.Country())
+		urn, err := urns.ParsePhone(infobipMessage.From, channel.Country(), true, false)
 		if err != nil {
 			return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 		}
@@ -158,16 +159,11 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	return handlers.WriteMsgsAndResponse(ctx, h, msgs, w, r, clog)
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
-	if username == "" {
-		return nil, fmt.Errorf("no username set for IB channel")
-	}
-
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if password == "" {
-		return nil, fmt.Errorf("no password set for IB channel")
+	if username == "" || password == "" {
+		return courier.ErrChannelConfig
 	}
 
 	transliteration := msg.Channel().StringConfigForKey(configTransliteration, "")
@@ -197,38 +193,39 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 	requestBody := &bytes.Buffer{}
 	err := json.NewEncoder(requestBody).Encode(ibMsg)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// build our request
 	req, err := http.NewRequest(http.MethodPost, sendURL, requestBody)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.SetBasicAuth(username, password)
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
-
 	resp, respBody, err := h.RequestHTTP(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
 	groupID, err := jsonparser.GetInt(respBody, "messages", "[0]", "status", "groupId")
 	if err != nil || (groupID != 1 && groupID != 3) {
-		clog.Error(courier.ErrorResponseValueUnexpected("groupId", "1", "3"))
-		return status, nil
+		return courier.ErrResponseUnexpected
 	}
 
-	externalID, _ := jsonparser.GetString(respBody, "messages", "[0]", "messageId")
-	if externalID != "" {
-		status.SetExternalID(externalID)
+	externalID, err := jsonparser.GetString(respBody, "messages", "[0]", "messageId")
+	if err != nil {
+		clog.Error(courier.ErrorResponseValueMissing("messageId"))
+	} else {
+
+		res.AddExternalID(externalID)
 	}
 
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	return nil
 }
 
 func (h *handler) RedactValues(ch courier.Channel) []string {

@@ -1,24 +1,21 @@
 package bongolive
 
 import (
-	"net/http/httptest"
 	"net/url"
 	"testing"
 
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
-
-var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BL", "2020", "KE", nil),
-}
 
 const (
 	receiveURL = "/c/bl/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive/"
 )
 
-var testCases = []IncomingTestCase{
+var incomingCases = []IncomingTestCase{
 	{
 		Label:                "Receive Valid",
 		URL:                  receiveURL,
@@ -76,25 +73,23 @@ var testCases = []IncomingTestCase{
 }
 
 func TestIncoming(t *testing.T) {
-	RunIncomingTestCases(t, testChannels, newHandler(), testCases)
+	chs := []courier.Channel{
+		test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BL", "2020", "KE", []string{urns.Phone.Prefix}, nil),
+	}
+	RunIncomingTestCases(t, chs, newHandler(), incomingCases)
 }
 
-func BenchmarkHandler(b *testing.B) {
-	RunChannelBenchmarks(b, testChannels, newHandler(), testCases)
-}
-
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURL = s.URL
-}
-
-var defaultSendTestCases = []OutgoingTestCase{
+var outgoingCases = []OutgoingTestCase{
 	{
-		Label:              "Plain Send",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{"results": [{"status": "0", "msgid": "123"}]}`,
-		MockResponseStatus: 200,
+		Label:          "Plain Send",
+		MsgText:        "Simple Message ☺",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.blsmsgw.com:8443/bin/send.json*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"results": [{"status": "0", "msgid": "123"}]}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Params: url.Values{
@@ -108,17 +103,18 @@ var defaultSendTestCases = []OutgoingTestCase{
 				},
 			},
 		},
-		ExpectedMsgStatus:  "W",
-		ExpectedExternalID: "123",
-		SendPrep:           setSendURL,
+		ExpectedExtIDs: []string{"123"},
 	},
 	{
-		Label:              "Bad Status",
-		MsgText:            "Simple Message ☺",
-		MsgURN:             "tel:+250788383383",
-		MsgAttachments:     []string{"image/jpeg:https://foo.bar/image.jpg"},
-		MockResponseBody:   `{"results": [{"status": "3"}]}`,
-		MockResponseStatus: 200,
+		Label:          "Bad Status",
+		MsgText:        "Simple Message ☺",
+		MsgURN:         "tel:+250788383383",
+		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.blsmsgw.com:8443/bin/send.json*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"results": [{"status": "3"}]}`)),
+			},
+		},
 		ExpectedRequests: []ExpectedRequest{
 			{
 				Params: url.Values{
@@ -132,34 +128,61 @@ var defaultSendTestCases = []OutgoingTestCase{
 				},
 			},
 		},
-		ExpectedMsgStatus: "E",
-		SendPrep:          setSendURL,
+		ExpectedError: courier.ErrResponseUnexpected,
 	},
 	{
-		Label:              "Error status 403",
-		MsgText:            "Error Response",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `{"results": [{"status": "1", "msgid": "123"}]}`,
-		MockResponseStatus: 403,
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error status 403",
+		MsgText: "Error Response",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.blsmsgw.com:8443/bin/send.json*": {
+				httpx.NewMockResponse(403, nil, []byte(`{"results": [{"status": "1", "msgid": "123"}]}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Params: url.Values{
+					"USERNAME":   {"user1"},
+					"PASSWORD":   {"pass1"},
+					"SOURCEADDR": {"2020"},
+					"DESTADDR":   {"250788383383"},
+					"DLR":        {"1"},
+					"MESSAGE":    {"Error Response"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrResponseStatus,
 	},
 	{
-		Label:              "Error Sending",
-		MsgText:            "Error Message",
-		MsgURN:             "tel:+250788383383",
-		MockResponseBody:   `Bad Gateway`,
-		MockResponseStatus: 501,
-		ExpectedMsgStatus:  "E",
-		SendPrep:           setSendURL,
+		Label:   "Error Sending",
+		MsgText: "Error Message",
+		MsgURN:  "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://api.blsmsgw.com:8443/bin/send.json*": {
+				httpx.NewMockResponse(501, nil, []byte(`Bad Gateway`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{
+				Params: url.Values{
+					"USERNAME":   {"user1"},
+					"PASSWORD":   {"pass1"},
+					"SOURCEADDR": {"2020"},
+					"DESTADDR":   {"250788383383"},
+					"DLR":        {"1"},
+					"MESSAGE":    {"Error Message"},
+				},
+			},
+		},
+		ExpectedError: courier.ErrConnectionFailed,
 	},
 }
 
 func TestOutgoing(t *testing.T) {
-	var defaultChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BL", "2020", "KE",
-		map[string]any{
-			courier.ConfigUsername: "user1",
-			courier.ConfigPassword: "pass1",
-		})
-	RunOutgoingTestCases(t, defaultChannel, newHandler(), defaultSendTestCases, []string{"pass1"}, nil)
+	ch := test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "BL", "2020", "KE",
+		[]string{urns.Phone.Prefix},
+		map[string]any{courier.ConfigUsername: "user1", courier.ConfigPassword: "pass1"},
+	)
+
+	RunOutgoingTestCases(t, ch, newHandler(), outgoingCases, []string{"pass1"}, nil)
 }

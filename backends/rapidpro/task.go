@@ -12,10 +12,7 @@ import (
 func queueMsgHandling(rc redis.Conn, c *Contact, m *Msg) error {
 	channel := m.Channel().(*Channel)
 
-	// queue to mailroom
 	body := map[string]any{
-		"contact_id":      c.ID_,
-		"org_id":          channel.OrgID_,
 		"channel_id":      channel.ID_,
 		"msg_id":          m.ID_,
 		"msg_uuid":        m.UUID(),
@@ -32,8 +29,8 @@ func queueMsgHandling(rc redis.Conn, c *Contact, m *Msg) error {
 
 func queueChannelEvent(rc redis.Conn, c *Contact, e *ChannelEvent) error {
 	body := map[string]any{
-		"org_id":      e.OrgID_,
-		"contact_id":  e.ContactID_,
+		"event_id":    e.ID_,
+		"event_type":  e.EventType_,
 		"urn_id":      e.ContactURNID_,
 		"channel_id":  e.ChannelID_,
 		"extra":       e.Extra(),
@@ -41,27 +38,15 @@ func queueChannelEvent(rc redis.Conn, c *Contact, e *ChannelEvent) error {
 		"occurred_on": e.OccurredOn_,
 		"created_on":  e.CreatedOn_,
 	}
-
-	switch e.EventType() {
-	case courier.EventTypeStopContact:
-		return queueMailroomTask(rc, "stop_contact", e.OrgID_, e.ContactID_, body)
-	case courier.EventTypeWelcomeMessage:
-		return queueMailroomTask(rc, "welcome_message", e.OrgID_, e.ContactID_, body)
-	case courier.EventTypeReferral:
-		return queueMailroomTask(rc, "referral", e.OrgID_, e.ContactID_, body)
-	case courier.EventTypeNewConversation:
-		return queueMailroomTask(rc, "new_conversation", e.OrgID_, e.ContactID_, body)
-	case courier.EventTypeOptIn:
-		return queueMailroomTask(rc, "optin", e.OrgID_, e.ContactID_, body)
-	case courier.EventTypeOptOut:
-		return queueMailroomTask(rc, "optout", e.OrgID_, e.ContactID_, body)
-	default:
-		return fmt.Errorf("unknown event type: %s", e.EventType())
+	if e.OptInID_ != 0 {
+		body["optin_id"] = e.OptInID_
 	}
+
+	return queueMailroomTask(rc, "channel_event", e.OrgID_, e.ContactID_, body)
 }
 
 func queueMsgDeleted(rc redis.Conn, ch *Channel, msgID courier.MsgID, contactID ContactID) error {
-	return queueMailroomTask(rc, "msg_deleted", ch.OrgID_, contactID, map[string]any{"org_id": ch.OrgID_, "msg_id": msgID})
+	return queueMailroomTask(rc, "msg_deleted", ch.OrgID_, contactID, map[string]any{"msg_id": msgID})
 }
 
 // queueMailroomTask queues the passed in task to mailroom. Mailroom processes both messages and
@@ -70,7 +55,6 @@ func queueMailroomTask(rc redis.Conn, taskType string, orgID OrgID, contactID Co
 	// create our event task
 	eventJSON := jsonx.MustMarshal(mrTask{
 		Type:     taskType,
-		OrgID:    orgID,
 		Task:     body,
 		QueuedOn: time.Now(),
 	})
@@ -78,7 +62,6 @@ func queueMailroomTask(rc redis.Conn, taskType string, orgID OrgID, contactID Co
 	// create our org task
 	contactJSON := jsonx.MustMarshal(mrTask{
 		Type:     "handle_contact_event",
-		OrgID:    orgID,
 		Task:     mrContactTask{ContactID: contactID},
 		QueuedOn: time.Now(),
 	})
@@ -103,7 +86,6 @@ type mrContactTask struct {
 
 type mrTask struct {
 	Type     string    `json:"type"`
-	OrgID    OrgID     `json:"org_id"`
 	Task     any       `json:"task"`
 	QueuedOn time.Time `json:"queued_on"`
 }

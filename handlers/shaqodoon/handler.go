@@ -2,6 +2,7 @@ package shaqodoon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,7 +11,7 @@ import (
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
-	"github.com/pkg/errors"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 /*
@@ -72,7 +73,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 		form.From = "+" + form.From[1:]
 	}
 
-	urn, err := handlers.StrictTelForCountry(form.From, channel.Country())
+	urn, err := urns.ParsePhone(form.From, channel.Country(), true, false)
 	if err != nil {
 		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
 	}
@@ -82,17 +83,13 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
 }
 
-// Send sends the given message, logging any HTTP calls or errors
-func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	sendURL := msg.Channel().StringConfigForKey(courier.ConfigSendURL, "")
-	if sendURL == "" {
-		return nil, fmt.Errorf("missing send_url for SQ channel")
-	}
 
 	username := msg.Channel().StringConfigForKey(courier.ConfigUsername, "")
 	password := msg.Channel().StringConfigForKey(courier.ConfigPassword, "")
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("missing username or password for SQ channel")
+	if username == "" || password == "" || sendURL == "" {
+		return courier.ErrChannelConfig
 	}
 
 	// build our request
@@ -109,17 +106,16 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.Ch
 
 	req, err := http.NewRequest(http.MethodGet, sendURL, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	status := h.Backend().NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusErrored, clog)
-
 	resp, _, err := h.RequestHTTPInsecure(req, clog)
-	if err != nil || resp.StatusCode/100 != 2 {
-		return status, nil
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
 	}
 
-	status.SetStatus(courier.MsgStatusWired)
-	return status, nil
+	return nil
 }

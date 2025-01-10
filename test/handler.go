@@ -2,12 +2,12 @@ package test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
-	"github.com/pkg/errors"
 )
 
 func init() {
@@ -31,7 +31,7 @@ func (h *mockHandler) UseChannelRouteUUID() bool             { return true }
 func (h *mockHandler) RedactValues(courier.Channel) []string { return []string{"sesame"} }
 
 func (h *mockHandler) GetChannel(ctx context.Context, r *http.Request) (courier.Channel, error) {
-	dmChannel := NewMockChannel("e4bb1578-29da-4fa5-a214-9da19dd24230", "MCK", "2020", "US", map[string]any{})
+	dmChannel := NewMockChannel("e4bb1578-29da-4fa5-a214-9da19dd24230", "MCK", "2020", "US", []string{urns.Phone.Prefix}, map[string]any{})
 	return dmChannel, nil
 }
 
@@ -44,16 +44,28 @@ func (h *mockHandler) Initialize(s courier.Server) error {
 }
 
 // Send sends the given message, logging any HTTP calls or errors
-func (h *mockHandler) Send(ctx context.Context, msg courier.MsgOut, clog *courier.ChannelLog) (courier.StatusUpdate, error) {
+func (h *mockHandler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	// log a request that contains a header value that should be redacted
 	req, _ := httpx.NewRequest("GET", "http://mock.com/send", nil, map[string]string{"Authorization": "Token sesame"})
-	trace, _ := httpx.DoTrace(http.DefaultClient, req, nil, nil, 1024)
+	trace, err := httpx.DoTrace(http.DefaultClient, req, nil, nil, 1024)
 	clog.HTTP(trace)
+
+	if err != nil || trace.Response.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if trace.Response.StatusCode == 403 {
+		return courier.ErrContactStopped
+	} else if trace.Response.StatusCode == 429 {
+		return courier.ErrConnectionThrottled
+	}
 
 	// log an error than contains a value that should be redacted
 	clog.Error(courier.NewChannelError("seeds", "", "contains sesame seeds"))
 
-	return h.backend.NewStatusUpdate(msg.Channel(), msg.ID(), courier.MsgStatusSent, clog), nil
+	if msg.Text() == "err:config" {
+		return courier.ErrChannelConfig
+	}
+
+	return nil
 }
 
 func (h *mockHandler) WriteStatusSuccessResponse(ctx context.Context, w http.ResponseWriter, statuses []courier.StatusUpdate) error {

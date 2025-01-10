@@ -1,13 +1,15 @@
 package yo
 
 import (
-	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/nyaruka/courier"
 	. "github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 var (
@@ -22,7 +24,7 @@ var (
 )
 
 var testChannels = []courier.Channel{
-	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "YO", "2020", "US", map[string]any{"username": "yo-username", "password": "yo-password"}),
+	test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "YO", "2020", "UG", []string{urns.Phone.Prefix}, map[string]any{"username": "yo-username", "password": "yo-password"}),
 }
 
 var handleTestCases = []IncomingTestCase{
@@ -34,7 +36,7 @@ var handleTestCases = []IncomingTestCase{
 		ExpectedMsgText: Sp("Join"), ExpectedURN: "tel:+2349067554729", ExpectedDate: time.Date(2017, 6, 23, 12, 30, 0, int(500*time.Millisecond), time.UTC)},
 	{Label: "Receive Valid Message With Time", URL: receiveValidMessageWithTime, Data: "", ExpectedRespStatus: 200, ExpectedBodyContains: "Accepted",
 		ExpectedMsgText: Sp("Join"), ExpectedURN: "tel:+2349067554729", ExpectedDate: time.Date(2017, 6, 23, 12, 30, 0, 0, time.UTC)},
-	{Label: "Invalid URN", URL: receiveInvalidURN, Data: "", ExpectedRespStatus: 400, ExpectedBodyContains: "phone number supplied is not a number"},
+	{Label: "Invalid URN", URL: receiveInvalidURN, Data: "", ExpectedRespStatus: 400, ExpectedBodyContains: "not a possible number"},
 	{Label: "Receive No Params", URL: receiveNoParams, Data: "", ExpectedRespStatus: 400, ExpectedBodyContains: "must have one of 'sender' or 'from'"},
 	{Label: "Receive No Sender", URL: receiveNoSender, Data: "", ExpectedRespStatus: 400, ExpectedBodyContains: "must have one of 'sender' or 'from'"},
 	{Label: "Receive Invalid Date", URL: receiveInvalidDate, Data: "", ExpectedRespStatus: 400, ExpectedBodyContains: "invalid date format, must be RFC 3339"},
@@ -48,58 +50,113 @@ func BenchmarkHandler(b *testing.B) {
 	RunChannelBenchmarks(b, testChannels, newHandler(), handleTestCases)
 }
 
-// setSendURL takes care of setting the send_url to our test server host
-func setSendURL(s *httptest.Server, h courier.ChannelHandler, c courier.Channel, m courier.MsgOut) {
-	sendURLs = []string{s.URL}
-}
-
 var getSendTestCases = []OutgoingTestCase{
 	{Label: "Plain Send",
 		MsgText: "Simple Message", MsgURN: "tel:+250788383383",
-		ExpectedMsgStatus: "W",
-		MockResponseBody:  "ybs_autocreate_status=OK", MockResponseStatus: 200,
-		ExpectedURLParams: map[string]string{
-			"sms_content":  "Simple Message",
-			"destinations": "250788383383",
-			"ybsacctno":    "yo-username",
-			"password":     "yo-password",
-			"origin":       "2020"},
-		SendPrep: setSendURL},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(200, nil, []byte(`ybs_autocreate_status=OK`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"Simple Message"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+	},
 	{Label: "Blacklisted",
 		MsgText: "Simple Message", MsgURN: "tel:+250788383383",
-		ExpectedMsgStatus: "F",
-		MockResponseBody:  "ybs_autocreate_status=ERROR&ybs_autocreate_message=256794224665%3ABLACKLISTED", MockResponseStatus: 200,
-		ExpectedURLParams: map[string]string{"sms_content": "Simple Message", "destinations": string("250788383383"), "origin": "2020"},
-		SendPrep:          setSendURL,
-		ExpectedStopEvent: true},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(200, nil, []byte(`ybs_autocreate_status=ERROR&ybs_autocreate_message=256794224665%3ABLACKLISTED`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"Simple Message"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+		ExpectedError: courier.ErrContactStopped,
+	},
 	{Label: "Errored wrong authorization",
 		MsgText: "Simple Message", MsgURN: "tel:+250788383383",
-		ExpectedMsgStatus: "E",
-		MockResponseBody:  "ybs_autocreate_status=ERROR&ybs_autocreate_message=YBS+AutoCreate+Subsystem%3A+Access+denied+due+to+wrong+authorization+code", MockResponseStatus: 200,
-		ExpectedURLParams: map[string]string{"sms_content": "Simple Message", "destinations": string("250788383383"), "origin": "2020"},
-		SendPrep:          setSendURL},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(200, nil, []byte(`ybs_autocreate_status=ERROR&ybs_autocreate_message=YBS+AutoCreate+Subsystem%3A+Access+denied+due+to+wrong+authorization+code`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"Simple Message"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+		ExpectedError: courier.ErrResponseUnexpected,
+	},
 	{Label: "Unicode Send",
 		MsgText: "☺", MsgURN: "tel:+250788383383",
-		ExpectedMsgStatus: "W",
-		MockResponseBody:  "ybs_autocreate_status=OK", MockResponseStatus: 200,
-		ExpectedURLParams: map[string]string{"sms_content": "☺", "destinations": string("250788383383"), "origin": "2020"},
-		SendPrep:          setSendURL},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(200, nil, []byte(`ybs_autocreate_status=OK`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"☺"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+	},
 	{Label: "Error Sending",
 		MsgText: "Error Message", MsgURN: "tel:+250788383383",
-		ExpectedMsgStatus: "E",
-		MockResponseBody:  "Error", MockResponseStatus: 401,
-		ExpectedURLParams: map[string]string{"sms_content": `Error Message`, "destinations": string("250788383383")},
-		SendPrep:          setSendURL},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(401, nil, []byte(`Error`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"Error Message"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+		ExpectedError: courier.ErrResponseStatus,
+	},
+	{Label: "Connection error",
+		MsgText: "Error Message", MsgURN: "tel:+250788383383",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(500, nil, []byte(`Error`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"Error Message"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+		ExpectedError: courier.ErrConnectionFailed,
+	},
 	{Label: "Send Attachment",
 		MsgText: "My pic!", MsgURN: "tel:+250788383383", MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
-		ExpectedMsgStatus: "W",
-		MockResponseBody:  "ybs_autocreate_status=OK", MockResponseStatus: 200,
-		ExpectedURLParams: map[string]string{"sms_content": "My pic!\nhttps://foo.bar/image.jpg", "destinations": string("250788383383"), "origin": "2020"},
-		SendPrep:          setSendURL},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"http://smgw1.yo.co.ug:9100/sendsms*": {
+				httpx.NewMockResponse(200, nil, []byte(`ybs_autocreate_status=OK`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{Params: url.Values{"sms_content": {"My pic!\nhttps://foo.bar/image.jpg"},
+			"destinations": {"250788383383"},
+			"ybsacctno":    {"yo-username"},
+			"password":     {"yo-password"},
+			"origin":       {"2020"},
+		}}},
+	},
 }
 
 func TestOutgoing(t *testing.T) {
-	var getChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "YO", "2020", "US", map[string]any{"username": "yo-username", "password": "yo-password"})
+	var getChannel = test.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "YO", "2020", "UG", []string{urns.Phone.Prefix}, map[string]any{"username": "yo-username", "password": "yo-password"})
 
 	RunOutgoingTestCases(t, getChannel, newHandler(), getSendTestCases, []string{"yo-password"}, nil)
 }
