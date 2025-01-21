@@ -16,12 +16,12 @@ import (
 	"time"
 
 	"github.com/buger/jsonparser"
-	"github.com/gabriel-vasile/mimetype"
 	"github.com/gomodule/redigo/redis"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/backends/rapidpro"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/courier/utils"
+	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/i18n"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/urns"
@@ -920,14 +920,9 @@ func (h *handler) fetchMediaID(msg courier.MsgOut, mediaURL string, clog *courie
 		return "", fmt.Errorf("error building request to media endpoint: %w", err)
 	}
 	setWhatsAppAuthHeader(&req.Header, msg.Channel())
-	mtype := http.DetectContentType(respBody)
+	mediaType, _ := httpx.DetectContentType(respBody)
+	req.Header.Add("Content-Type", mediaType)
 
-	if mtype != mimeType || mtype == "application/octet-stream" || mtype == "application/zip" {
-		mimeT := mimetype.Detect(respBody)
-		req.Header.Add("Content-Type", mimeT.String())
-	} else {
-		req.Header.Add("Content-Type", mtype)
-	}
 	resp, respBody, err = h.RequestHTTP(req, clog)
 	if err != nil || resp.StatusCode/100 != 2 {
 		failedMediaCache.Set(failKey, true, cache.DefaultExpiration)
