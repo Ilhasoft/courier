@@ -70,7 +70,7 @@ func newChannelEvent(channel courier.Channel, eventType courier.ChannelEventType
 		URN_:         urn,
 		EventType_:   eventType,
 		OccurredOn_:  time.Now().In(time.UTC),
-		LogUUIDs:     []string{string(clog.UUID())},
+		LogUUIDs:     []string{string(clog.UUID)},
 
 		channel: dbChannel,
 	}
@@ -163,7 +163,7 @@ func writeChannelEventToDB(ctx context.Context, b *backend, e *ChannelEvent, clo
 	}
 
 	// queue it up for handling by RapidPro
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
 	// if we had a problem queueing the event, log it

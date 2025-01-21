@@ -11,6 +11,7 @@ import (
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
+	"github.com/nyaruka/courier/utils/clogs"
 	"github.com/nyaruka/gocommon/dates"
 	"github.com/nyaruka/gocommon/urns"
 )
@@ -80,11 +81,9 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 
 		// build our request
 		form := url.Values{
-			"username": []string{username},
-			"password": []string{password},
-			"to":       []string{to},
-			"from":     []string{from},
-			"msg":      []string{part},
+			"to":   []string{to},
+			"from": []string{from},
+			"msg":  []string{part},
 		}
 
 		date := dates.Now().UTC().Format("02/01/2006")
@@ -94,10 +93,8 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 		hash := hex.EncodeToString(hasher.Sum(nil))
 
 		form["key"] = []string{strings.ToUpper(hash)}
-		encodedForm := form.Encode()
-		tsSendURL = fmt.Sprintf("%s?%s", tsSendURL, encodedForm)
 
-		req, err := http.NewRequest(http.MethodGet, tsSendURL, nil)
+		req, err := http.NewRequest(http.MethodPost, tsSendURL, strings.NewReader(form.Encode()))
 		if err != nil {
 			return err
 		}
@@ -111,7 +108,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 		}
 
 		if !strings.Contains(string(respBody), "Success") {
-			clog.Error(courier.NewChannelError("", "", "Received invalid response content: %s", string(respBody)))
+			clog.Error(clogs.NewLogError("", "", "Received invalid response content: %s", string(respBody)))
 			return courier.ErrResponseUnexpected
 		}
 	}
