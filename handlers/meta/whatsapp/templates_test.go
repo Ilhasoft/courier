@@ -146,7 +146,7 @@ func TestGetTemplatePayload(t *testing.T) {
 				Name:     "Update",
 				Language: &whatsapp.Language{Policy: "deterministic", Code: "en"},
 				Components: []*whatsapp.Component{
-					{Type: "header", Params: []*whatsapp.Param{{Type: "document", Document: &whatsapp.Media{Link: "http://example.com/doc.pdf"}}}},
+					{Type: "header", Params: []*whatsapp.Param{{Type: "document", Document: &whatsapp.Media{Link: "http://example.com/doc.pdf", Filename: "doc.pdf"}}}},
 					{Type: "body", Params: []*whatsapp.Param{{Type: "text", Text: "Hello"}, {Type: "text", Text: "Bob"}}},
 				},
 			},
@@ -177,7 +177,8 @@ func TestGetTemplatePayload(t *testing.T) {
 				Name:     "Update",
 				Language: &whatsapp.Language{Policy: "deterministic", Code: "en"},
 				Components: []*whatsapp.Component{
-					{Type: "header", Params: []*whatsapp.Param{{Type: "document", Document: &whatsapp.Media{Link: "http://example.com/doc.pdf"}}}},
+					{Type: "header", Params: []*whatsapp.Param{{Type: "document", Document: &whatsapp.Media{Link: "http://example.com/doc.pdf", Filename: "doc.pdf"}}}},
+					{Type: "body", Params: []*whatsapp.Param{{Type: "text", Text: "Hello"}, {Type: "text", Text: "Bob"}}},
 				},
 			},
 		},
