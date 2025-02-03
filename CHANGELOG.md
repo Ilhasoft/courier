@@ -1,3 +1,208 @@
+v10.0.0 (2025-01-07)
+-------------------------
+ * Update README.md
+
+v9.3.44 (2024-12-19)
+-------------------------
+ * Remove previously added aggregated versions of channel type specific metrics because apparently we don't need them
+
+v9.3.43 (2024-12-19)
+-------------------------
+ * Send metrics without channel type as well
+
+v9.3.42 (2024-12-18)
+-------------------------
+ * Fix integer rounding in duration metrics
+
+v9.3.41 (2024-12-18)
+-------------------------
+ * Tweak metric reporter so all errors are logged
+
+v9.3.40 (2024-12-18)
+-------------------------
+ * Fix duration metrics
+
+v9.3.39 (2024-12-18)
+-------------------------
+ * Make backend responsible for reporting its own metrics
+
+v9.3.38 (2024-12-18)
+-------------------------
+ * Refactor metrics so that everything is sent from Heartbeat in the backend
+ * Send metrics to cloudwatch
+
+v9.3.37 (2024-12-16)
+-------------------------
+ * Revert "Fail messages when we hit contact pair limit"
+
+v9.3.36 (2024-12-16)
+-------------------------
+ * Merge pull request #812 from nyaruka/fail-contact-pair-limit
+ * Fail messages when we hit contact pair limit
+
+v9.3.35 (2024-12-12)
+-------------------------
+ * Simplify JPE and JFIF extensions to be saved as JPG
+ * Update Facebook API version to v18.0
+
+v9.3.34 (2024-12-06)
+-------------------------
+ * Fix WA template document  name
+
+v9.3.33 (2024-12-04)
+-------------------------
+ * Add support for document send with link when attachment type is document
+ * Remove TWT channel type
+
+v9.3.32 (2024-11-25)
+-------------------------
+ * Make all WAC Throttling Errors return courier.ErrConnectionThrottled
+ * TST handler should error sends with msg text \error
+
+v9.3.31 (2024-11-18)
+-------------------------
+ * Add dummy handler type for load testing
+
+v9.3.30 (2024-11-15)
+-------------------------
+ * Update deps (inc latest phonenumbers)
+
+v9.3.29 (2024-11-12)
+-------------------------
+ * Include redis pool active/idle counts in heartbeat stats
+ * Bump redis pool size to 64
+
+v9.3.28 (2024-11-11)
+-------------------------
+ * More closing of redis connections and logging of errors
+
+v9.3.27 (2024-11-06)
+-------------------------
+ * Agressively close redis connections
+
+v9.3.26 (2024-11-05)
+-------------------------
+ * Use redisx.NewIntervalSet to track sent message ids
+ * Mark as sent in redis any message send that does result in status errored
+ * Remove request for redis connection that wasn't being used in D360 handler
+
+v9.3.25 (2024-11-04)
+-------------------------
+ * Tweak healthcheck for redis to timeout after a second
+ * Don't set next attempt for incoming messages
+ * Log error when marking queue job for outgoing message complete fails
+
+v9.3.24 (2024-10-21)
+-------------------------
+ * Ignore reels as attachments on FB channels
+
+v9.3.23 (2024-10-16)
+-------------------------
+ * Update deps including phonenumbers to get latest metadata
+
+v9.3.22 (2024-10-09)
+-------------------------
+ * Ignore reels as attachments on FBA/IG channels
+
+v9.3.21 (2024-10-09)
+-------------------------
+ * Better error logging for attachment requests
+
+v9.3.20 (2024-09-20)
+-------------------------
+ * Ignore */* as an attachment content type
+
+v9.3.19 (2024-09-18)
+-------------------------
+ * Stop writing channel logs to S3
+
+v9.3.18 (2024-09-12)
+-------------------------
+ * Use 'tasks:handler' queue name instead of 'handler'
+
+v9.3.17 (2024-09-12)
+-------------------------
+ * Write all channel logs to DynamoDB
+
+v9.3.16 (2024-09-11)
+-------------------------
+ * Use ordered v7 UUIDs for channel logs
+
+v9.3.15 (2024-09-11)
+-------------------------
+ * Add dynamodb support to backend
+
+v9.3.14 (2024-09-10)
+-------------------------
+ * Update TS channel type to use POST requests
+
+v9.3.13 (2024-09-09)
+-------------------------
+ * Never save attachments with empty content type
+
+v9.3.12 (2024-09-09)
+-------------------------
+ * Update to go 1.23
+ * Tidy up getting FCM credentials
+
+v9.3.11 (2024-09-04)
+-------------------------
+ * Use quick replies dumps of the options list and pass that as a string to FCM data
+
+v9.3.10 (2024-08-29)
+-------------------------
+ * No quick replies support for new FCM
+ * Cleanup unused variables
+
+v9.3.9 (2024-08-28)
+-------------------------
+ * Fix FCM message struct and token source initialization
+
+v9.3.8 (2024-08-26)
+-------------------------
+ * Merge pull request #773 from nyaruka/fix-FCM-fetch-token
+ * Adjust converting auth config to JSON
+
+v9.3.7 (2024-08-26)
+-------------------------
+ * Merge pull request #772 from nyaruka/fix-FCM-fetch-token
+ * Adjust FCM JSON config for getting token
+
+v9.3.6 (2024-08-22)
+-------------------------
+ * Fix context used during backend startup
+
+v9.3.5 (2024-08-22)
+-------------------------
+ * Update to aws-sdk-go-v2
+
+v9.3.4 (2024-08-07)
+-------------------------
+ * Fix FCM authentication config retrieve to expect map[string]string
+ * Remove old code no longer used
+
+v9.3.3 (2024-08-02)
+-------------------------
+ * Update to latest gocommon
+
+v9.3.2 (2024-07-29)
+-------------------------
+ * Replace storage usage for logs
+
+v9.3.1 (2024-07-29)
+-------------------------
+ * Switch to s3x for attachments to get correct urls when using minio
+ * Update FCM handler to use google auth to generate bearer tokens
+
+v9.3.0 (2024-07-25)
+-------------------------
+ * Support minio for local dev enviroment and CI
+ * Update AWS/S3 configs
+
+v9.2.1 (2024-07-23)
+-------------------------
+ * Fix unnecessarily writing send channel logs to the database
+
 v9.2.0 (2024-07-17)
 -------------------------
  * Update README

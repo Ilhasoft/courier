@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/h2non/filetype"
 	"github.com/nyaruka/courier/utils"
+	"github.com/nyaruka/courier/utils/clogs"
 	"github.com/nyaruka/gocommon/httpx"
 )
 
@@ -34,8 +37,8 @@ type fetchAttachmentRequest struct {
 }
 
 type fetchAttachmentResponse struct {
-	Attachment *Attachment    `json:"attachment"`
-	LogUUID    ChannelLogUUID `json:"log_uuid"`
+	Attachment *Attachment   `json:"attachment"`
+	LogUUID    clogs.LogUUID `json:"log_uuid"`
 }
 
 func fetchAttachment(ctx context.Context, b Backend, r *http.Request) (*fetchAttachmentResponse, error) {
@@ -68,16 +71,16 @@ func fetchAttachment(ctx context.Context, b Backend, r *http.Request) (*fetchAtt
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error fetching attachment for msg #%d: %w", fa.MsgID, err)
 	}
 
-	return &fetchAttachmentResponse{Attachment: attachment, LogUUID: clog.UUID()}, nil
+	return &fetchAttachmentResponse{Attachment: attachment, LogUUID: clog.UUID}, nil
 }
 
 func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, attURL string, clog *ChannelLog) (*Attachment, error) {
 	parsedURL, err := url.Parse(attURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to parse attachment url '%s': %w", attURL, err)
 	}
 
 	var attRequest *http.Request
@@ -107,40 +110,7 @@ func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, at
 		return nil, err
 	}
 
-	mimeType := ""
-	extension := filepath.Ext(parsedURL.Path)
-	if extension != "" {
-		extension = extension[1:]
-	}
-
-	// prioritize to use the response content type header if provided
-	contentTypeHeader := trace.Response.Header.Get("Content-Type")
-	if contentTypeHeader != "" && contentTypeHeader != "application/octet-stream" {
-		mimeType, _, _ = mime.ParseMediaType(contentTypeHeader)
-		if extension == "" {
-			extensions, err := mime.ExtensionsByType(mimeType)
-			if extensions == nil || err != nil {
-				extension = ""
-			} else {
-				extension = extensions[0][1:]
-			}
-		}
-	} else {
-
-		// first try getting our mime type from the first 300 bytes of our body
-		fileType, _ := filetype.Match(trace.ResponseBody[:300])
-		if fileType != filetype.Unknown {
-			mimeType = fileType.MIME.Value
-			extension = fileType.Extension
-		} else {
-			// if that didn't work, try from our extension
-			fileType = filetype.GetType(extension)
-			if fileType != filetype.Unknown {
-				mimeType = fileType.MIME.Value
-				extension = fileType.Extension
-			}
-		}
-	}
+	mimeType, extension := getAttachmentType(trace)
 
 	storageURL, err := b.SaveAttachment(ctx, channel, mimeType, trace.ResponseBody, extension)
 	if err != nil {
@@ -148,4 +118,55 @@ func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, at
 	}
 
 	return &Attachment{ContentType: mimeType, URL: storageURL, Size: len(trace.ResponseBody)}, nil
+}
+
+func getAttachmentType(t *httpx.Trace) (string, string) {
+	var typ string
+
+	// use extension from url path if it exists
+	ext := filepath.Ext(t.Request.URL.Path)
+
+	// prioritize to use the response content type header if provided
+	contentTypeHeader := t.Response.Header.Get("Content-Type")
+	if contentTypeHeader != "" {
+		typ, _, _ = mime.ParseMediaType(contentTypeHeader)
+	}
+
+	// if we didn't get a meaningful content type from the header, try to guess it from the body
+	if typ == "" || typ == "*/*" || typ == "application/octet-stream" {
+		fileType, _ := filetype.Match(t.ResponseBody[:300])
+		if fileType != filetype.Unknown {
+			typ = fileType.MIME.Value
+			if ext == "" {
+				ext = fileType.Extension
+			}
+		}
+	}
+
+	// if we still don't have a type but the path has an extension, try to use that
+	if typ == "" && ext != "" {
+		fileType := filetype.GetType(ext)
+		if fileType != filetype.Unknown {
+			typ = fileType.MIME.Value
+		}
+	}
+
+	// if we have a type but no extension, try to get one from the type
+	if ext == "" {
+		extensions, err := mime.ExtensionsByType(typ)
+		if len(extensions) > 0 && err == nil {
+			ext = extensions[0][1:]
+			if slices.Contains([]string{"jpe", "jfif"}, ext) {
+				ext = "jpg"
+			}
+
+		}
+	}
+
+	// got to default to something...
+	if typ == "" {
+		typ = "application/octet-stream"
+	}
+
+	return typ, strings.TrimPrefix(ext, ".")
 }

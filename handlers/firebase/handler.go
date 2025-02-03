@@ -6,19 +6,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/buger/jsonparser"
+	"github.com/gomodule/redigo/redis"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/jsonx"
 	"github.com/nyaruka/gocommon/urns"
+	"golang.org/x/oauth2/google"
 )
 
 const (
-	configTitle        = "FCM_TITLE"
-	configNotification = "FCM_NOTIFICATION"
-	configKey          = "FCM_KEY"
+	configTitle           = "FCM_TITLE"
+	configNotification    = "FCM_NOTIFICATION"
+	configKey             = "FCM_KEY"
+	configCredentialsFile = "FCM_CREDENTIALS_JSON"
 )
 
 var (
@@ -32,10 +37,15 @@ func init() {
 
 type handler struct {
 	handlers.BaseHandler
+
+	fetchTokenMutex sync.Mutex
 }
 
 func newHandler() courier.ChannelHandler {
-	return &handler{handlers.NewBaseHandler(courier.ChannelType("FCM"), "Firebase", handlers.WithRedactConfigKeys(configKey))}
+	return &handler{
+		BaseHandler:     handlers.NewBaseHandler(courier.ChannelType("FCM"), "Firebase", handlers.WithRedactConfigKeys(configKey)),
+		fetchTokenMutex: sync.Mutex{},
+	}
 }
 
 func (h *handler) Initialize(s courier.Server) error {
@@ -121,6 +131,24 @@ func (h *handler) registerContact(ctx context.Context, channel courier.Channel, 
 }
 
 type mtPayload struct {
+	Message struct {
+		Data struct {
+			Type          string `json:"type"`
+			Title         string `json:"title"`
+			Message       string `json:"message"`
+			MessageID     string `json:"message_id"`
+			SessionStatus string `json:"session_status"`
+			QuickReplies  string `json:"quick_replies,omitempty"`
+		} `json:"data"`
+		Notification *mtNotification `json:"notification,omitempty"`
+		Token        string          `json:"token"`
+		Android      struct {
+			Priority string `json:"priority"`
+		} `json:"android,omitempty"`
+	} `json:"message"`
+}
+
+type mtAPIKeyPayload struct {
 	Data struct {
 		Type          string   `json:"type"`
 		Title         string   `json:"title"`
@@ -141,6 +169,16 @@ type mtNotification struct {
 }
 
 func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
+	fcmKey := msg.Channel().StringConfigForKey(configKey, "")
+
+	if fcmKey != "" {
+		return h.sendWithAPIKey(msg, res, clog)
+	}
+
+	return h.sendWithCredsJSON(msg, res, clog)
+}
+
+func (h *handler) sendWithAPIKey(msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
 	title := msg.Channel().StringConfigForKey(configTitle, "")
 	fcmKey := msg.Channel().StringConfigForKey(configKey, "")
 	if title == "" || fcmKey == "" {
@@ -155,7 +193,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 	}
 
 	for i, part := range msgParts {
-		payload := mtPayload{}
+		payload := mtAPIKeyPayload{}
 
 		payload.Data.Type = "rapidpro"
 		payload.Data.Title = title
@@ -212,4 +250,148 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 	}
 
 	return nil
+}
+
+func (h *handler) sendWithCredsJSON(msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
+	title := msg.Channel().StringConfigForKey(configTitle, "")
+	credentialsJSONRaw := msg.Channel().ConfigForKey(configCredentialsFile, nil)
+	credentialsJSON, _ := credentialsJSONRaw.(map[string]any)
+	if credentialsJSON == nil {
+		return courier.ErrChannelConfig
+	}
+	projectID := credentialsJSON["project_id"].(string)
+
+	accessToken, err := h.getAccessToken(msg.Channel())
+	if err != nil {
+		return err
+	}
+
+	configNotification := msg.Channel().ConfigForKey(configNotification, false)
+	notification, _ := configNotification.(bool)
+	msgParts := make([]string, 0)
+	if msg.Text() != "" {
+		msgParts = handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
+	}
+	sendURL := fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", projectID)
+
+	for i, part := range msgParts {
+		payload := mtPayload{}
+
+		payload.Message.Data.Type = "rapidpro"
+		payload.Message.Data.Title = title
+		payload.Message.Data.Message = part
+		payload.Message.Data.MessageID = msg.ID().String()
+		payload.Message.Data.SessionStatus = msg.SessionStatus()
+
+		if i == len(msgParts)-1 {
+			if msg.QuickReplies() != nil {
+				payload.Message.Data.QuickReplies = string(jsonx.MustMarshal(msg.QuickReplies()))
+			}
+		}
+
+		payload.Message.Token = msg.URNAuth()
+		payload.Message.Android.Priority = "high"
+
+		if notification {
+			payload.Message.Notification = &mtNotification{
+				Title: title,
+				Body:  part,
+			}
+		}
+
+		jsonPayload := jsonx.MustMarshal(payload)
+
+		req, err := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(jsonPayload))
+		if err != nil {
+			return err
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
+		resp, respBody, err := h.RequestHTTP(req, clog)
+		if err != nil || resp.StatusCode/100 == 5 {
+			return courier.ErrConnectionFailed
+		} else if resp.StatusCode/100 != 2 {
+			return courier.ErrResponseStatus
+		}
+
+		responseName, err := jsonparser.GetString(respBody, "name")
+		if err != nil {
+			return courier.ErrResponseUnexpected
+		}
+
+		if !strings.Contains(responseName, fmt.Sprintf("projects/%s/messages/", projectID)) {
+			return courier.ErrResponseUnexpected
+		}
+		externalID := strings.TrimLeft(responseName, fmt.Sprintf("projects/%s/messages/", projectID))
+		if externalID == "" {
+			return courier.ErrResponseUnexpected
+		}
+
+		res.AddExternalID(externalID)
+
+	}
+
+	return nil
+}
+
+func (h *handler) getAccessToken(channel courier.Channel) (string, error) {
+	tokenKey := fmt.Sprintf("channel-token:%s", channel.UUID())
+
+	h.fetchTokenMutex.Lock()
+	defer h.fetchTokenMutex.Unlock()
+
+	var token string
+	var err error
+	h.WithRedisConn(func(rc redis.Conn) {
+		token, err = redis.String(rc.Do("GET", tokenKey))
+	})
+
+	if err != nil && err != redis.ErrNil {
+		return "", fmt.Errorf("error reading cached access token: %w", err)
+	}
+
+	if token != "" {
+		return token, nil
+	}
+
+	token, expires, err := h.fetchAccessToken(channel)
+	if err != nil {
+		return "", fmt.Errorf("error fetching new access token: %w", err)
+	}
+
+	h.WithRedisConn(func(rc redis.Conn) {
+		_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("error updating cached access token: %w", err)
+	}
+
+	return token, nil
+}
+
+// fetchAccessToken tries to fetch a new token for our channel, setting the result in redis
+func (h *handler) fetchAccessToken(channel courier.Channel) (string, time.Duration, error) {
+	credentialsJSONRaw := channel.ConfigForKey(configCredentialsFile, nil)
+	credentialsJSON, _ := credentialsJSONRaw.(map[string]any)
+	if credentialsJSON == nil {
+		return "", 0, courier.ErrChannelConfig
+	}
+
+	scopes := []string{"https://www.googleapis.com/auth/firebase.messaging"}
+
+	ts, err := google.JWTAccessTokenSourceWithScope(jsonx.MustMarshal(credentialsJSON), scopes...)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create NewTokenSource: %w", err)
+	}
+
+	token, err := ts.Token()
+	if err != nil {
+		return "", 0, err
+	}
+
+	return token.AccessToken, token.Expiry.UTC().Sub(time.Now().UTC()), nil
 }

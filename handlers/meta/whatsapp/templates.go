@@ -1,12 +1,13 @@
 package whatsapp
 
 import (
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
-	"golang.org/x/exp/maps"
+	"github.com/nyaruka/courier/utils"
 )
 
 func GetTemplatePayload(templating *courier.Templating) *Template {
@@ -19,9 +20,8 @@ func GetTemplatePayload(templating *courier.Templating) *Template {
 	for _, comp := range templating.Components {
 		// get the variables used by this component in order of their names 1, 2 etc
 		compParams := make([]courier.TemplatingVariable, 0, len(comp.Variables))
-		varNames := maps.Keys(comp.Variables)
-		sort.Strings(varNames)
-		for _, varName := range varNames {
+
+		for _, varName := range slices.Sorted(maps.Keys(comp.Variables)) {
 			compParams = append(compParams, templating.Variables[comp.Variables[varName]])
 		}
 
@@ -34,13 +34,17 @@ func GetTemplatePayload(templating *courier.Templating) *Template {
 				if p.Type != "text" {
 					attType, attURL := handlers.SplitAttachment(p.Value)
 					attType = strings.Split(attType, "/")[0]
+					if attType == "application" {
+						attType = "document"
+					}
 
 					if attType == "image" {
 						component.Params = append(component.Params, &Param{Type: "image", Image: &Media{Link: attURL}})
 					} else if attType == "video" {
 						component.Params = append(component.Params, &Param{Type: "video", Video: &Media{Link: attURL}})
-					} else if attType == "application" {
-						component.Params = append(component.Params, &Param{Type: "document", Document: &Media{Link: attURL}})
+					} else if attType == "document" {
+						filename, _ := utils.BasePathForURL(attURL)
+						component.Params = append(component.Params, &Param{Type: "document", Document: &Media{Link: attURL, Filename: filename}})
 					}
 				} else {
 					component.Params = append(component.Params, &Param{Type: p.Type, Text: p.Value})

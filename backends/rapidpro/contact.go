@@ -12,7 +12,6 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/courier"
-	"github.com/nyaruka/gocommon/analytics"
 	"github.com/nyaruka/gocommon/dbutil"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
@@ -105,7 +104,7 @@ WHERE
 
 // contactForURN first tries to look up a contact for the passed in URN, if not finding one then creating one
 func contactForURN(ctx context.Context, b *backend, org OrgID, channel *Channel, urn urns.URN, authTokens map[string]string, name string, clog *courier.ChannelLog) (*Contact, error) {
-	log := slog.With("org_id", org, "urn", urn.Identity(), "channel_uuid", channel.UUID(), "log_uuid", clog.UUID())
+	log := slog.With("org_id", org, "urn", urn.Identity(), "channel_uuid", channel.UUID(), "log_uuid", clog.UUID)
 
 	// try to look up our contact by URN
 	contact := &Contact{}
@@ -135,7 +134,7 @@ func contactForURN(ctx context.Context, b *backend, org OrgID, channel *Channel,
 
 	// didn't find it, we need to create it instead
 	contact.OrgID_ = org
-	contact.UUID_ = courier.ContactUUID(uuids.New())
+	contact.UUID_ = courier.ContactUUID(uuids.NewV4())
 	contact.CreatedOn_ = time.Now()
 	contact.ModifiedOn_ = time.Now()
 	contact.IsNew_ = true
@@ -219,9 +218,7 @@ func contactForURN(ctx context.Context, b *backend, org OrgID, channel *Channel,
 	// store this URN on our contact
 	contact.URNID_ = contactURN.ID
 
-	// log that we created a new contact to librato
-	analytics.Gauge("courier.new_contact", float64(1))
+	b.stats.RecordContactCreated()
 
-	// and return it
 	return contact, nil
 }

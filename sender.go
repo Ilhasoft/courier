@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/nyaruka/gocommon/analytics"
+	"github.com/nyaruka/courier/utils/clogs"
 	"github.com/nyaruka/gocommon/urns"
 )
 
@@ -287,8 +287,6 @@ func (w *Sender) sendMessage(msg MsgOut) {
 		log = log.With("quick_replies", msg.QuickReplies())
 	}
 
-	start := time.Now()
-
 	// if this is a resend, clear our sent status
 	if msg.IsResend() {
 		err := backend.ClearMsgSent(sendCTX, msg.ID())
@@ -325,19 +323,7 @@ func (w *Sender) sendMessage(msg MsgOut) {
 		log.Warn("duplicate send, marking as wired")
 
 	} else {
-
 		status = w.sendByHandler(sendCTX, handler, msg, clog, log)
-
-		duration := time.Since(start)
-		secondDuration := float64(duration) / float64(time.Second)
-		log.Debug("send complete", "status", status.Status(), "elapsed", duration)
-
-		// report to librato
-		if status.Status() == MsgStatusErrored || status.Status() == MsgStatusFailed {
-			analytics.Gauge(fmt.Sprintf("courier.msg_send_error_%s", msg.Channel().ChannelType()), secondDuration)
-		} else {
-			analytics.Gauge(fmt.Sprintf("courier.msg_send_%s", msg.Channel().ChannelType()), secondDuration)
-		}
 	}
 
 	// we allot 10 seconds to write our status to the db
@@ -358,7 +344,7 @@ func (w *Sender) sendMessage(msg MsgOut) {
 	}
 
 	// mark our send task as complete
-	backend.MarkOutgoingMsgComplete(writeCTX, msg, status)
+	backend.OnSendComplete(writeCTX, msg, status, clog)
 }
 
 func (w *Sender) sendByHandler(ctx context.Context, h ChannelHandler, m MsgOut, clog *ChannelLog, log *slog.Logger) StatusUpdate {
@@ -391,7 +377,7 @@ func (w *Sender) sendByHandler(ctx context.Context, h ChannelHandler, m MsgOut, 
 			status.SetStatus(MsgStatusFailed)
 		}
 
-		clog.Error(NewChannelError(serr.clogCode, serr.clogExtCode, serr.clogMsg))
+		clog.Error(clogs.NewLogError(serr.clogCode, serr.clogExtCode, serr.clogMsg))
 
 		// if handler returned ErrContactStopped need to write a stop event
 		if serr == ErrContactStopped {
@@ -406,7 +392,7 @@ func (w *Sender) sendByHandler(ctx context.Context, h ChannelHandler, m MsgOut, 
 
 		status.SetStatus(MsgStatusErrored)
 
-		clog.Error(NewChannelError("internal_error", "", "An internal error occured."))
+		clog.Error(clogs.NewLogError("internal_error", "", "An internal error occured."))
 	}
 
 	return status

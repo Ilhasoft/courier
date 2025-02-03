@@ -11,6 +11,8 @@ import (
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/courier/utils/clogs"
+	"github.com/nyaruka/gocommon/dates"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
@@ -93,6 +95,11 @@ func TestIncoming(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	assert.Contains(t, string(body), "missing from or text")
 
+	assert.Len(t, mb.WrittenChannelLogs(), 1)
+	clog := mb.WrittenChannelLogs()[0]
+	assert.False(t, clog.Attached())
+	assert.Len(t, clog.HttpLogs, 1)
+
 	req, _ := http.NewRequest("GET", "http://localhost:8081/c/mck/e4bb1578-29da-4fa5-a214-9da19dd24230/receive?from=2065551212&text=hello", nil)
 	req.Header.Set("Cookie", "secret")
 	resp, err = http.DefaultClient.Do(req)
@@ -102,6 +109,11 @@ func TestIncoming(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ = io.ReadAll(resp.Body)
 	assert.Contains(t, string(body), "ok")
+
+	assert.Len(t, mb.WrittenChannelLogs(), 2)
+	clog = mb.WrittenChannelLogs()[1]
+	assert.True(t, clog.Attached())
+	assert.Len(t, clog.HttpLogs, 1)
 }
 
 func TestOutgoing(t *testing.T) {
@@ -152,11 +164,11 @@ func TestOutgoing(t *testing.T) {
 	// and we should have a channel log with redacted errors and traces
 	assert.Len(t, mb.WrittenChannelLogs(), 1)
 	clog := mb.WrittenChannelLogs()[0]
-	assert.Equal(t, []*courier.ChannelError{courier.NewChannelError("seeds", "", "contains ********** seeds")}, clog.Errors())
+	assert.Equal(t, []*clogs.LogError{clogs.NewLogError("seeds", "", "contains ********** seeds")}, clog.Errors)
+	assert.True(t, clog.Attached())
+	assert.Len(t, clog.HttpLogs, 1)
 
-	assert.Len(t, clog.HTTPLogs(), 1)
-
-	hlog := clog.HTTPLogs()[0]
+	hlog := clog.HttpLogs[0]
 	assert.Equal(t, "http://mock.com/send", hlog.URL)
 	assert.Equal(t,
 		"GET /send HTTP/1.1\r\nHost: mock.com\r\nUser-Agent: Go-http-client/1.1\r\nAuthorization: Token **********\r\nAccept-Encoding: gzip\r\n\r\n",
@@ -231,7 +243,7 @@ func TestFetchAttachment(t *testing.T) {
 	httpx.SetRequestor(httpMocks)
 
 	defer uuids.SetGenerator(uuids.DefaultGenerator)
-	uuids.SetGenerator(uuids.NewSeededGenerator(1234))
+	uuids.SetGenerator(uuids.NewSeededGenerator(1234, dates.NewSequentialNow(time.Date(2024, 9, 11, 14, 33, 0, 0, time.UTC), time.Second)))
 
 	logger := slog.Default()
 	config := courier.NewDefaultConfig()
@@ -281,23 +293,23 @@ func TestFetchAttachment(t *testing.T) {
 
 	statusCode, respBody = submit(`{"channel_uuid": "e4bb1578-29da-4fa5-a214-9da19dd24230", "channel_type": "MCK", "url": "http://mock.com/media/hello.jpg"}`, "sesame")
 	assert.Equal(t, 200, statusCode)
-	assert.JSONEq(t, `{"attachment": {"content_type": "image/jpeg", "url": "https://backend.com/attachments/cdf7ed27-5ad5-4028-b664-880fc7581c77.jpg", "size": 17301}, "log_uuid": "c00e5d67-c275-4389-aded-7d8b151cbd5b"}`, string(respBody))
+	assert.JSONEq(t, `{"attachment": {"content_type": "image/jpeg", "url": "https://backend.com/attachments/cdf7ed27-5ad5-4028-b664-880fc7581c77.jpg", "size": 17301}, "log_uuid": "0191e180-7d60-7000-aded-7d8b151cbd5b"}`, string(respBody))
 
 	assert.Len(t, mb.WrittenChannelLogs(), 1)
 	clog := mb.WrittenChannelLogs()[0]
-	assert.Equal(t, courier.ChannelLogTypeAttachmentFetch, clog.Type())
-	assert.Len(t, clog.HTTPLogs(), 1)
-	assert.Greater(t, clog.Elapsed(), time.Duration(0))
+	assert.Equal(t, courier.ChannelLogTypeAttachmentFetch, clog.Type)
+	assert.Len(t, clog.HttpLogs, 1)
+	assert.Greater(t, clog.Elapsed, time.Duration(0))
 
 	// if fetching attachment from channel returns non-200, return unavailable attachment so caller doesn't retry
 	statusCode, respBody = submit(`{"channel_uuid": "e4bb1578-29da-4fa5-a214-9da19dd24230", "channel_type": "MCK", "url": "http://mock.com/media/hello.mp3"}`, "sesame")
 	assert.Equal(t, 200, statusCode)
-	assert.JSONEq(t, `{"attachment": {"content_type": "unavailable", "url": "http://mock.com/media/hello.mp3", "size": 0}, "log_uuid": "547deaf7-7620-4434-95b3-58675999c4b7"}`, string(respBody))
+	assert.JSONEq(t, `{"attachment": {"content_type": "unavailable", "url": "http://mock.com/media/hello.mp3", "size": 0}, "log_uuid": "0191e180-8148-7000-95b3-58675999c4b7"}`, string(respBody))
 
 	// same if fetching attachment times out
 	statusCode, respBody = submit(`{"channel_uuid": "e4bb1578-29da-4fa5-a214-9da19dd24230", "channel_type": "MCK", "url": "http://mock.com/media/hello.pdf"}`, "sesame")
 	assert.Equal(t, 200, statusCode)
-	assert.JSONEq(t, `{"attachment": {"content_type": "unavailable", "url": "http://mock.com/media/hello.pdf", "size": 0}, "log_uuid": "338ff339-5663-49ed-8ef6-384876655d1b"}`, string(respBody))
+	assert.JSONEq(t, `{"attachment": {"content_type": "unavailable", "url": "http://mock.com/media/hello.pdf", "size": 0}, "log_uuid": "0191e180-8530-7000-8ef6-384876655d1b"}`, string(respBody))
 }
 
 // utility to send a message on a mocked backend and block until it's marked as sent

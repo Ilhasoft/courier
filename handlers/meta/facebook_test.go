@@ -197,7 +197,15 @@ var facebookIncomingTests = []IncomingTestCase{
 		PrepRequest: addValidSignature,
 	},
 	{
-		Label:              "Receive Fallback Attachment",
+		Label:              "Receive unsupported reel attachment",
+		URL:                "/c/fba/receive",
+		Data:               string(test.ReadFile("./testdata/fba/reel.json")),
+		ExpectedRespStatus: 200,
+		ExpectedEvents:     []ExpectedEvent{},
+		PrepRequest:        addValidSignature,
+	},
+	{
+		Label:              "Receive unsupported fallback attachment",
 		URL:                "/c/fba/receive",
 		Data:               string(test.ReadFile("./testdata/fba/fallback.json")),
 		ExpectedRespStatus: 200,
@@ -363,7 +371,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgURN:    "facebook:12345",
 		MsgOrigin: courier.MsgOriginChat,
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -379,7 +387,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgURN:    "facebook:12345",
 		MsgOrigin: courier.MsgOriginBroadcast,
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -396,7 +404,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgURNAuth: "345678",
 		MsgOrigin:  courier.MsgOriginBroadcast,
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -413,7 +421,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgOrigin:               courier.MsgOriginFlow,
 		MsgResponseToExternalID: "23526",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -430,7 +438,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgOrigin:               courier.MsgOriginFlow,
 		MsgResponseToExternalID: "23526",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133", "recipient_id": "12345"}`)),
 			},
 		},
@@ -448,7 +456,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgOrigin:       courier.MsgOriginBroadcast,
 		MsgQuickReplies: []string{"Yes", "No"},
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -465,7 +473,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgOrigin:       courier.MsgOriginBroadcast,
 		MsgQuickReplies: []string{"Yes", "No"},
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -482,7 +490,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgQuickReplies: []string{"Yes", "No"},
 		MsgTopic:        "account",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
@@ -504,7 +512,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgURN:         "facebook:12345",
 		MsgAttachments: []string{"image/jpeg:https://foo.bar/image.jpg"},
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -522,7 +530,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgQuickReplies: []string{"Yes", "No"},
 		MsgTopic:        "event",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
@@ -544,7 +552,22 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgURN:         "facebook:12345",
 		MsgAttachments: []string{"application/pdf:https://foo.bar/document.pdf"},
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
+				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{{
+			Params: url.Values{"access_token": {"a123"}},
+			Body:   `{"messaging_type":"UPDATE","recipient":{"id":"12345"},"message":{"attachment":{"type":"file","payload":{"url":"https://foo.bar/document.pdf","is_reusable":true}}}}`,
+		}},
+		ExpectedExtIDs: []string{"mid.133"},
+	},
+	{
+		Label:          "Document attachment, document link",
+		MsgURN:         "facebook:12345",
+		MsgAttachments: []string{"document:https://foo.bar/document.pdf"},
+		MockResponses: map[string][]*httpx.MockResponse{
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -559,7 +582,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgURN:   "facebook:12345",
 		MsgOptIn: &courier.OptInReference{ID: 3456, Name: "Joke Of The Day"},
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{"message_id": "mid.133"}`)),
 			},
 		},
@@ -574,7 +597,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgText: "ID Error",
 		MsgURN:  "facebook:12345",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{ "is_error": true }`)),
 			},
 		},
@@ -585,7 +608,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgText: "Error",
 		MsgURN:  "facebook:12345",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(403, nil, []byte(`{ "is_error": true }`)),
 			},
 		},
@@ -596,7 +619,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgText: "Error",
 		MsgURN:  "facebook:12345",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`bad json`)),
 			},
 		},
@@ -607,7 +630,7 @@ var facebookOutgoingTests = []OutgoingTestCase{
 		MsgText: "Error",
 		MsgURN:  "facebook:12345",
 		MockResponses: map[string][]*httpx.MockResponse{
-			"https://graph.facebook.com/v17.0/me/messages*": {
+			"https://graph.facebook.com/v18.0/me/messages*": {
 				httpx.NewMockResponse(200, nil, []byte(`{ "error": {"message": "The image size is too large.","code": 36000 }}`)),
 			},
 		},

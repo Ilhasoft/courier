@@ -9,8 +9,8 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"os"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,8 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/nyaruka/courier/utils"
-	"github.com/nyaruka/gocommon/analytics"
+	"github.com/nyaruka/courier/utils/clogs"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/jsonx"
 )
@@ -37,7 +36,7 @@ const (
 type Server interface {
 	Config() *Config
 
-	AddHandlerRoute(handler ChannelHandler, method string, action string, logType ChannelLogType, handlerFunc ChannelHandleFunc)
+	AddHandlerRoute(handler ChannelHandler, method string, action string, logType clogs.LogType, handlerFunc ChannelHandleFunc)
 	GetHandler(Channel) ChannelHandler
 
 	Backend() Backend
@@ -91,14 +90,6 @@ func NewServerWithLogger(config *Config, backend Backend, logger *slog.Logger) S
 // if it encounters any unrecoverable (or ignorable) error, though its bias is to move forward despite
 // connection errors
 func (s *server) Start() error {
-	// configure librato if we have configuration options for it
-	host, _ := os.Hostname()
-	if s.config.LibratoUsername != "" {
-		analytics.RegisterBackend(analytics.NewLibrato(s.config.LibratoUsername, s.config.LibratoToken, host, time.Second, s.waitGroup))
-	}
-
-	analytics.Start()
-
 	// start our backend
 	err := s.backend.Start()
 	if err != nil {
@@ -138,25 +129,6 @@ func (s *server) Start() error {
 		}
 	}()
 
-	s.waitGroup.Add(1)
-
-	// start our heartbeat
-	go func() {
-		defer s.waitGroup.Done()
-
-		for !s.stopped {
-			select {
-			case <-s.stopChan:
-				return
-			case <-time.After(time.Minute):
-				err := s.backend.Heartbeat()
-				if err != nil {
-					slog.Error("error running backend heartbeat", "error", err)
-				}
-			}
-		}
-	}()
-
 	slog.Info(fmt.Sprintf("server listening on %d", s.config.Port),
 		"comp", "server",
 		"port", s.config.Port,
@@ -193,8 +165,6 @@ func (s *server) Stop() error {
 	if err != nil {
 		return err
 	}
-
-	analytics.Stop()
 
 	// wait for everything to stop
 	s.waitGroup.Wait()
@@ -240,7 +210,7 @@ func (s *server) initializeChannelHandlers() {
 	// initialize handlers which are included/not-excluded in the config
 	for _, handler := range registeredHandlers {
 		channelType := string(handler.ChannelType())
-		if (includes == nil || utils.StringArrayContains(includes, channelType)) && (excludes == nil || !utils.StringArrayContains(excludes, channelType)) {
+		if (includes == nil || slices.Contains(includes, channelType)) && (excludes == nil || !slices.Contains(excludes, channelType)) {
 			err := handler.Initialize(s)
 			if err != nil {
 				log.Fatal(err)
@@ -255,10 +225,8 @@ func (s *server) initializeChannelHandlers() {
 	sort.Strings(s.chanRoutes)
 }
 
-func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc ChannelHandleFunc, logType ChannelLogType) http.HandlerFunc {
+func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc ChannelHandleFunc, logType clogs.LogType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-
 		// stuff a few things in our context that help with logging
 		baseCtx := context.WithValue(r.Context(), contextRequestURL, r.URL.String())
 		baseCtx = context.WithValue(baseCtx, contextRequestStart, time.Now())
@@ -299,8 +267,6 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 		clog := NewChannelLogForIncoming(logType, channel, recorder, handler.RedactValues(channel))
 
 		events, hErr := handlerFunc(ctx, channel, recorder.ResponseWriter, r, clog)
-		duration := time.Since(start)
-		secondDuration := float64(duration) / float64(time.Second)
 
 		// if we received an error, write it out and report it
 		if hErr != nil {
@@ -315,27 +281,15 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 		}
 
 		if channel != nil {
-			// if we have a channel but no events were created, we still log this to analytics
-			if len(events) == 0 {
-				if hErr != nil {
-					analytics.Gauge(fmt.Sprintf("courier.channel_error_%s", channel.ChannelType()), secondDuration)
-				} else {
-					analytics.Gauge(fmt.Sprintf("courier.channel_ignored_%s", channel.ChannelType()), secondDuration)
-				}
-			}
-
 			for _, event := range events {
 				switch e := event.(type) {
 				case MsgIn:
 					clog.SetAttached(true)
-					analytics.Gauge(fmt.Sprintf("courier.msg_receive_%s", channel.ChannelType()), secondDuration)
 					LogMsgReceived(r, e)
 				case StatusUpdate:
 					clog.SetAttached(true)
-					analytics.Gauge(fmt.Sprintf("courier.msg_status_%s", channel.ChannelType()), secondDuration)
 					LogMsgStatusReceived(r, e)
 				case ChannelEvent:
-					analytics.Gauge(fmt.Sprintf("courier.evt_receive_%s", channel.ChannelType()), secondDuration)
 					LogChannelEventReceived(r, e)
 				}
 			}
@@ -345,14 +299,15 @@ func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc Channe
 			if err := s.backend.WriteChannelLog(ctx, clog); err != nil {
 				slog.Error("error writing channel log", "error", err)
 			}
+
+			s.backend.OnReceiveComplete(ctx, channel, events, clog)
 		} else {
 			slog.Info("non-channel specific request", "error", err, "channel_type", handler.ChannelType(), "request", recorder.Trace.RequestTrace, "status", recorder.Trace.Response.StatusCode)
-
 		}
 	}
 }
 
-func (s *server) AddHandlerRoute(handler ChannelHandler, method string, action string, logType ChannelLogType, handlerFunc ChannelHandleFunc) {
+func (s *server) AddHandlerRoute(handler ChannelHandler, method string, action string, logType clogs.LogType, handlerFunc ChannelHandleFunc) {
 	method = strings.ToLower(method)
 	channelType := strings.ToLower(string(handler.ChannelType()))
 

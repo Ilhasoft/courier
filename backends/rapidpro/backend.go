@@ -19,17 +19,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/s3"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/gomodule/redigo/redis"
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/queue"
-	"github.com/nyaruka/gocommon/analytics"
+	"github.com/nyaruka/gocommon/aws/cwatch"
+	"github.com/nyaruka/gocommon/aws/dynamo"
+	"github.com/nyaruka/gocommon/aws/s3x"
 	"github.com/nyaruka/gocommon/cache"
 	"github.com/nyaruka/gocommon/dbutil"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/jsonx"
-	"github.com/nyaruka/gocommon/storage"
 	"github.com/nyaruka/gocommon/syncx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
@@ -39,14 +41,8 @@ import (
 // the name for our message queue
 const msgQueueName = "msgs"
 
-// the name of our set for tracking sends
-const sentSetName = "msgs_sent_%s"
-
 // our timeout for backend operations
 const backendTimeout = time.Second * 20
-
-// storage directory (only used with file system storage)
-var storageDir = "_storage"
 
 var uuidRegex = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
@@ -58,14 +54,15 @@ type backend struct {
 	config *courier.Config
 
 	statusWriter *StatusWriter
-	dbLogWriter  *DBLogWriter      // unattached logs being written to the database
-	stLogWriter  *StorageLogWriter // attached logs being written to storage
+	dbLogWriter  *DBLogWriter     // unattached logs being written to the database
+	dyLogWriter  *DynamoLogWriter // all logs being written to dynamo
 	writerWG     *sync.WaitGroup
 
-	db                *sqlx.DB
-	redisPool         *redis.Pool
-	attachmentStorage storage.Storage
-	logStorage        storage.Storage
+	db     *sqlx.DB
+	rp     *redis.Pool
+	dynamo *dynamo.Service
+	s3     *s3x.Service
+	cw     *cwatch.Service
 
 	channelsByUUID *cache.Local[courier.ChannelUUID, *Channel]
 	channelsByAddr *cache.Local[courier.ChannelAddress, *Channel]
@@ -84,14 +81,18 @@ type backend struct {
 	receivedExternalIDs *redisx.IntervalHash // using external id
 	receivedMsgs        *redisx.IntervalHash // using content hash
 
+	// tracking of sent message ids to avoid dupe sends
+	sentIDs *redisx.IntervalSet
+
 	// tracking of external ids of messages we've sent in case we need one before its status update has been written
 	sentExternalIDs *redisx.IntervalHash
 
-	// both sqlx and redis provide wait stats which are cummulative that we need to convert into increments
+	stats *StatsCollector
+
+	// both sqlx and redis provide wait stats which are cummulative that we need to convert into increments by
+	// tracking their previous values
 	dbWaitDuration    time.Duration
-	dbWaitCount       int64
 	redisWaitDuration time.Duration
-	redisWaitCount    int64
 }
 
 // NewBackend creates a new RapidPro backend
@@ -126,12 +127,18 @@ func newBackend(cfg *courier.Config) courier.Backend {
 
 		receivedMsgs:        redisx.NewIntervalHash("seen-msgs", time.Second*2, 2),        // 2 - 4 seconds
 		receivedExternalIDs: redisx.NewIntervalHash("seen-external-ids", time.Hour*24, 2), // 24 - 48 hours
+		sentIDs:             redisx.NewIntervalSet("sent-ids", time.Hour, 2),              // 1 - 2 hours
 		sentExternalIDs:     redisx.NewIntervalHash("sent-external-ids", time.Hour, 2),    // 1 - 2 hours
+
+		stats: NewStatsCollector(),
 	}
 }
 
 // Start starts our RapidPro backend, this tests our various connections and starts our spool flushers
 func (b *backend) Start() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// parse and test our redis config
 	log := slog.With("comp", "backend", "state", "starting")
 	log.Info("starting backend")
@@ -148,16 +155,13 @@ func (b *backend) Start() error {
 	b.db.SetMaxOpenConns(16)
 
 	// try connecting
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	err = b.db.PingContext(ctx)
-	cancel()
-	if err != nil {
+	if err := b.db.PingContext(ctx); err != nil {
 		log.Error("db not reachable", "error", err)
 	} else {
 		log.Info("db ok")
 	}
 
-	b.redisPool, err = redisx.NewPool(b.config.Redis)
+	b.rp, err = redisx.NewPool(b.config.Redis, redisx.WithMaxActive(b.config.MaxWorkers*2))
 	if err != nil {
 		log.Error("redis not reachable", "error", err)
 	} else {
@@ -166,52 +170,43 @@ func (b *backend) Start() error {
 
 	// start our dethrottler if we are going to be doing some sending
 	if b.config.MaxWorkers > 0 {
-		queue.StartDethrottler(b.redisPool, b.stopChan, b.waitGroup, msgQueueName)
+		queue.StartDethrottler(b.rp, b.stopChan, b.waitGroup, msgQueueName)
 	}
 
-	// create our storage (S3 or file system)
-	if b.config.AWSAccessKeyID != "" || b.config.AWSUseCredChain {
-		s3config := &storage.S3Options{
-			AWSAccessKeyID:     b.config.AWSAccessKeyID,
-			AWSSecretAccessKey: b.config.AWSSecretAccessKey,
-			Endpoint:           b.config.S3Endpoint,
-			Region:             b.config.S3Region,
-			DisableSSL:         b.config.S3DisableSSL,
-			ForcePathStyle:     b.config.S3ForcePathStyle,
-			MaxRetries:         3,
-		}
-		if b.config.AWSAccessKeyID != "" && !b.config.AWSUseCredChain {
-			s3config.AWSAccessKeyID = b.config.AWSAccessKeyID
-			s3config.AWSSecretAccessKey = b.config.AWSSecretAccessKey
-		}
-		s3Client, err := storage.NewS3Client(s3config)
-		if err != nil {
-			return err
-		}
-		b.attachmentStorage = storage.NewS3(s3Client, b.config.S3AttachmentsBucket, b.config.S3Region, s3.BucketCannedACLPublicRead, 32)
-		b.logStorage = storage.NewS3(s3Client, b.config.S3LogsBucket, b.config.S3Region, s3.BucketCannedACLPrivate, 32)
+	// setup DynamoDB
+	b.dynamo, err = dynamo.NewService(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.AWSRegion, b.config.DynamoEndpoint, b.config.DynamoTablePrefix)
+	if err != nil {
+		return err
+	}
+	if err := b.dynamo.Test(ctx); err != nil {
+		log.Error("dynamodb not reachable", "error", err)
 	} else {
-		b.attachmentStorage = storage.NewFS(storageDir+"/attachments", 0766)
-		b.logStorage = storage.NewFS(storageDir+"/logs", 0766)
+		log.Info("dynamodb ok")
+	}
+
+	// setup S3 storage
+	b.s3, err = s3x.NewService(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.AWSRegion, b.config.S3Endpoint, b.config.S3Minio)
+	if err != nil {
+		return err
+	}
+
+	b.cw, err = cwatch.NewService(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.AWSRegion, b.config.CloudwatchNamespace, b.config.DeploymentID)
+	if err != nil {
+		return err
+	}
+
+	// check attachment bucket access
+	if err := b.s3.Test(ctx, b.config.S3AttachmentsBucket); err != nil {
+		log.Error("attachments bucket not accessible", "error", err)
+	} else {
+		log.Info("attachments bucket ok")
 	}
 
 	// create and start channel caches...
-	b.channelsByUUID = cache.NewLocal[courier.ChannelUUID, *Channel](b.loadChannelByUUID, time.Minute)
+	b.channelsByUUID = cache.NewLocal(b.loadChannelByUUID, time.Minute)
 	b.channelsByUUID.Start()
-	b.channelsByAddr = cache.NewLocal[courier.ChannelAddress, *Channel](b.loadChannelByAddress, time.Minute)
+	b.channelsByAddr = cache.NewLocal(b.loadChannelByAddress, time.Minute)
 	b.channelsByAddr.Start()
-
-	// check our storages
-	if err := checkStorage(b.attachmentStorage); err != nil {
-		log.Error(b.attachmentStorage.Name()+" attachment storage not available", "error", err)
-	} else {
-		log.Info(b.attachmentStorage.Name() + " attachment storage ok")
-	}
-	if err := checkStorage(b.logStorage); err != nil {
-		log.Error(b.logStorage.Name()+" log storage not available", "error", err)
-	} else {
-		log.Info(b.logStorage.Name() + " log storage ok")
-	}
 
 	// make sure our spool dirs are writable
 	err = courier.EnsureSpoolDirPresent(b.config.SpoolDir, "msgs")
@@ -234,16 +229,50 @@ func (b *backend) Start() error {
 	b.dbLogWriter = NewDBLogWriter(b.db, b.writerWG)
 	b.dbLogWriter.Start()
 
-	b.stLogWriter = NewStorageLogWriter(b.logStorage, b.writerWG)
-	b.stLogWriter.Start()
+	b.dyLogWriter = NewDynamoLogWriter(b.dynamo, b.writerWG)
+	b.dyLogWriter.Start()
 
 	// register and start our spool flushers
 	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "msgs"), b.flushMsgFile)
 	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "statuses"), b.flushStatusFile)
 	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "events"), b.flushChannelEventFile)
 
+	b.startMetricsReporter(time.Minute)
+
 	slog.Info("backend started", "comp", "backend", "state", "started")
 	return nil
+}
+
+func (b *backend) startMetricsReporter(interval time.Duration) {
+	b.waitGroup.Add(1)
+
+	report := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+		count, err := b.reportMetrics(ctx)
+		cancel()
+		if err != nil {
+			slog.Error("error reporting metrics", "error", err)
+		} else {
+			slog.Info("sent metrics to cloudwatch", "count", count)
+		}
+	}
+
+	go func() {
+		defer func() {
+			slog.Info("metrics reporter exiting")
+			b.waitGroup.Done()
+		}()
+
+		for {
+			select {
+			case <-b.stopChan:
+				report()
+				return
+			case <-time.After(interval):
+				report()
+			}
+		}
+	}()
 }
 
 // Stop stops our RapidPro backend, closing our db and redis connections
@@ -256,6 +285,7 @@ func (b *backend) Stop() error {
 
 	// wait for our threads to exit
 	b.waitGroup.Wait()
+
 	return nil
 }
 
@@ -267,8 +297,8 @@ func (b *backend) Cleanup() error {
 	if b.dbLogWriter != nil {
 		b.dbLogWriter.Stop()
 	}
-	if b.stLogWriter != nil {
-		b.stLogWriter.Stop()
+	if b.dyLogWriter != nil {
+		b.dyLogWriter.Stop()
 	}
 
 	// wait for them to flush fully
@@ -278,7 +308,7 @@ func (b *backend) Cleanup() error {
 	if b.db != nil {
 		b.db.Close()
 	}
-	return b.redisPool.Close()
+	return b.rp.Close()
 }
 
 // GetChannel returns the channel for the passed in type and UUID
@@ -363,7 +393,7 @@ func (b *backend) DeleteMsgByExternalID(ctx context.Context, channel courier.Cha
 	}
 
 	if msgID != courier.NilMsgID && contactID != NilContactID {
-		rc := b.redisPool.Get()
+		rc := b.rp.Get()
 		defer rc.Close()
 
 		if err := queueMsgDeleted(rc, ch, msgID, contactID); err != nil {
@@ -395,113 +425,108 @@ func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text str
 
 // PopNextOutgoingMsg pops the next message that needs to be sent
 func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.MsgOut, error) {
-	// pop the next message off our queue
-	rc := b.redisPool.Get()
-	defer rc.Close()
+	tryToPop := func() (queue.WorkerToken, string, error) {
+		rc := b.rp.Get()
+		defer rc.Close()
+		return queue.PopFromQueue(rc, msgQueueName)
+	}
 
-	token, msgJSON, err := queue.PopFromQueue(rc, msgQueueName)
+	markComplete := func(token queue.WorkerToken) {
+		rc := b.rp.Get()
+		defer rc.Close()
+		if err := queue.MarkComplete(rc, msgQueueName, token); err != nil {
+			slog.Error("error marking queue task complete", "error", err)
+		}
+	}
+
+	// pop the next message off our queue
+	token, msgJSON, err := tryToPop()
 	if err != nil {
 		return nil, err
 	}
 
 	for token == queue.Retry {
-		token, msgJSON, err = queue.PopFromQueue(rc, msgQueueName)
+		token, msgJSON, err = tryToPop()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if msgJSON != "" {
-		dbMsg := &Msg{}
-		err = json.Unmarshal([]byte(msgJSON), dbMsg)
-		if err != nil {
-			queue.MarkComplete(rc, msgQueueName, token)
-			return nil, fmt.Errorf("unable to unmarshal message: %s: %w", string(msgJSON), err)
-		}
-
-		// populate the channel on our db msg
-		channel, err := b.GetChannel(ctx, courier.AnyChannelType, dbMsg.ChannelUUID_)
-		if err != nil {
-			queue.MarkComplete(rc, msgQueueName, token)
-			return nil, err
-		}
-
-		dbMsg.Direction_ = MsgOutgoing
-		dbMsg.channel = channel.(*Channel)
-		dbMsg.workerToken = token
-
-		// clear out our seen incoming messages
-		b.clearMsgSeen(rc, dbMsg)
-
-		return dbMsg, nil
+	if msgJSON == "" {
+		return nil, nil
 	}
 
-	return nil, nil
+	dbMsg := &Msg{}
+	err = json.Unmarshal([]byte(msgJSON), dbMsg)
+	if err != nil {
+		markComplete(token)
+		return nil, fmt.Errorf("unable to unmarshal message: %s: %w", string(msgJSON), err)
+	}
+
+	// populate the channel on our db msg
+	channel, err := b.GetChannel(ctx, courier.AnyChannelType, dbMsg.ChannelUUID_)
+	if err != nil {
+		markComplete(token)
+		return nil, err
+	}
+
+	dbMsg.Direction_ = MsgOutgoing
+	dbMsg.channel = channel.(*Channel)
+	dbMsg.workerToken = token
+
+	// clear out our seen incoming messages
+	b.clearMsgSeen(dbMsg)
+
+	return dbMsg, nil
 }
-
-var luaSent = redis.NewScript(3,
-	`-- KEYS: [TodayKey, YesterdayKey, MsgID]
-     local found = redis.call("sismember", KEYS[1], KEYS[3])
-     if found == 1 then
-	   return 1
-     end
-
-     return redis.call("sismember", KEYS[2], KEYS[3])
-`)
 
 // WasMsgSent returns whether the passed in message has already been sent
 func (b *backend) WasMsgSent(ctx context.Context, id courier.MsgID) (bool, error) {
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
-	todayKey := fmt.Sprintf(sentSetName, time.Now().UTC().Format("2006_01_02"))
-	yesterdayKey := fmt.Sprintf(sentSetName, time.Now().Add(time.Hour*-24).UTC().Format("2006_01_02"))
-	return redis.Bool(luaSent.Do(rc, todayKey, yesterdayKey, id.String()))
+	return b.sentIDs.IsMember(rc, id.String())
 }
-
-var luaClearSent = redis.NewScript(3,
-	`-- KEYS: [TodayKey, YesterdayKey, MsgID]
-	 redis.call("srem", KEYS[1], KEYS[3])
-     redis.call("srem", KEYS[2], KEYS[3])
-`)
 
 func (b *backend) ClearMsgSent(ctx context.Context, id courier.MsgID) error {
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
-	todayKey := fmt.Sprintf(sentSetName, time.Now().UTC().Format("2006_01_02"))
-	yesterdayKey := fmt.Sprintf(sentSetName, time.Now().Add(time.Hour*-24).UTC().Format("2006_01_02"))
-	_, err := luaClearSent.Do(rc, todayKey, yesterdayKey, id.String())
-	return err
+	return b.sentIDs.Rem(rc, id.String())
 }
 
-// MarkOutgoingMsgComplete marks the passed in message as having completed processing, freeing up a worker for that channel
-func (b *backend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.MsgOut, status courier.StatusUpdate) {
-	rc := b.redisPool.Get()
+// OnSendComplete is called when the sender has finished trying to send a message
+func (b *backend) OnSendComplete(ctx context.Context, msg courier.MsgOut, status courier.StatusUpdate, clog *courier.ChannelLog) {
+	rc := b.rp.Get()
 	defer rc.Close()
 
 	dbMsg := msg.(*Msg)
 
-	queue.MarkComplete(rc, msgQueueName, dbMsg.workerToken)
+	if err := queue.MarkComplete(rc, msgQueueName, dbMsg.workerToken); err != nil {
+		slog.Error("unable to mark queue task complete", "error", err)
+	}
 
-	// mark as sent in redis as well if this was actually wired or sent
-	if status != nil && (status.Status() == courier.MsgStatusSent || status.Status() == courier.MsgStatusWired) {
-		dateKey := fmt.Sprintf(sentSetName, time.Now().UTC().Format("2006_01_02"))
-		rc.Send("sadd", dateKey, msg.ID().String())
-		rc.Send("expire", dateKey, 60*60*24*2)
-		_, err := rc.Do("")
-		if err != nil {
-			slog.Error("unable to add new unsent message", "error", err, "sent_msgs_key", dateKey)
-		}
-
-		// if our msg has an associated session and timeout, update that
-		if dbMsg.SessionWaitStartedOn_ != nil {
-			err = updateSessionTimeout(ctx, b, dbMsg.SessionID_, *dbMsg.SessionWaitStartedOn_, dbMsg.SessionTimeout_)
-			if err != nil {
-				slog.Error("unable to update session timeout", "error", err, "session_id", dbMsg.SessionID_)
-			}
+	// if message won't be retried, mark as sent to avoid dupe sends
+	if status.Status() != courier.MsgStatusErrored {
+		if err := b.sentIDs.Add(rc, msg.ID().String()); err != nil {
+			slog.Error("unable to mark message sent", "error", err)
 		}
 	}
+
+	// if message was successfully sent, and we have a session timeout, update it
+	wasSuccess := status.Status() == courier.MsgStatusWired || status.Status() == courier.MsgStatusSent || status.Status() == courier.MsgStatusDelivered || status.Status() == courier.MsgStatusRead
+	if wasSuccess && dbMsg.SessionWaitStartedOn_ != nil {
+		if err := updateSessionTimeout(ctx, b, dbMsg.SessionID_, *dbMsg.SessionWaitStartedOn_, dbMsg.SessionTimeout_); err != nil {
+			slog.Error("unable to update session timeout", "error", err, "session_id", dbMsg.SessionID_)
+		}
+	}
+
+	b.stats.RecordOutgoing(msg.Channel().ChannelType(), wasSuccess, clog.Elapsed)
+}
+
+// OnReceiveComplete is called when the server has finished handling an incoming request
+func (b *backend) OnReceiveComplete(ctx context.Context, ch courier.Channel, events []courier.Event, clog *courier.ChannelLog) {
+	b.stats.RecordIncoming(ch.ChannelType(), events, clog.Elapsed)
 }
 
 // WriteMsg writes the passed in message to our store
@@ -543,7 +568,7 @@ func (b *backend) WriteStatusUpdate(ctx context.Context, status courier.StatusUp
 	if status.MsgID() != courier.NilMsgID {
 		// this is a message we've just sent and were given an external id for
 		if status.ExternalID() != "" {
-			rc := b.redisPool.Get()
+			rc := b.rp.Get()
 			defer rc.Close()
 
 			err := b.sentExternalIDs.Set(rc, fmt.Sprintf("%d|%s", su.ChannelID_, su.ExternalID_), fmt.Sprintf("%d", status.MsgID()))
@@ -641,27 +666,23 @@ func (b *backend) WriteChannelEvent(ctx context.Context, event courier.ChannelEv
 
 // WriteChannelLog persists the passed in log to our database, for rapidpro we swallow all errors, logging isn't critical
 func (b *backend) WriteChannelLog(ctx context.Context, clog *courier.ChannelLog) error {
-	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
-	defer cancel()
-
-	queueChannelLog(timeout, b, clog)
-
+	queueChannelLog(b, clog)
 	return nil
 }
 
 // SaveAttachment saves an attachment to backend storage
 func (b *backend) SaveAttachment(ctx context.Context, ch courier.Channel, contentType string, data []byte, extension string) (string, error) {
 	// create our filename
-	filename := string(uuids.New())
+	filename := string(uuids.NewV4())
 	if extension != "" {
 		filename = fmt.Sprintf("%s.%s", filename, extension)
 	}
 
 	orgID := ch.(*Channel).OrgID()
 
-	path := filepath.Join(b.config.S3AttachmentsPrefix, strconv.FormatInt(int64(orgID), 10), filename[:4], filename[4:8], filename)
+	path := filepath.Join("attachments", strconv.FormatInt(int64(orgID), 10), filename[:4], filename[4:8], filename)
 
-	storageURL, err := b.attachmentStorage.Put(ctx, path, contentType, data)
+	storageURL, err := b.s3.PutObject(ctx, b.config.S3AttachmentsBucket, path, contentType, data, s3types.ObjectCannedACLPublicRead)
 	if err != nil {
 		return "", fmt.Errorf("error saving attachment to storage (bytes=%d): %w", len(data), err)
 	}
@@ -679,14 +700,14 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	mediaUUID := uuidRegex.FindString(u.Path)
 
 	// if hostname isn't our media domain, or path doesn't contain a UUID, don't try to resolve
-	if strings.Replace(u.Hostname(), fmt.Sprintf("%s.", b.config.S3Region), "", -1) != b.config.MediaDomain || mediaUUID == "" {
+	if strings.Replace(u.Hostname(), fmt.Sprintf("%s.", b.config.AWSRegion), "", -1) != b.config.MediaDomain || mediaUUID == "" {
 		return nil, nil
 	}
 
 	unlock := b.mediaMutexes.Lock(mediaUUID)
 	defer unlock()
 
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
 	var media *Media
@@ -708,7 +729,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	}
 
 	// if we found a media record but it doesn't match the URL, don't use it
-	if media == nil || (media.URL() != mediaUrl && media.URL() != strings.Replace(mediaUrl, fmt.Sprintf("%s.", b.config.S3Region), "", -1)) {
+	if media == nil || (media.URL() != mediaUrl && media.URL() != strings.Replace(mediaUrl, fmt.Sprintf("%s.", b.config.AWSRegion), "", -1)) {
 		return nil, nil
 	}
 
@@ -729,12 +750,17 @@ func (b *backend) HttpAccess() *httpx.AccessConfig {
 // Health returns the health of this backend as a string, returning "" if all is well
 func (b *backend) Health() string {
 	// test redis
-	rc := b.redisPool.Get()
-	defer rc.Close()
-	_, redisErr := rc.Do("PING")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	rc, redisErr := b.rp.GetContext(ctx)
+	cancel()
+
+	if redisErr == nil {
+		defer rc.Close()
+		_, redisErr = rc.Do("PING")
+	}
 
 	// test our db
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 	dbErr := b.db.PingContext(ctx)
 	cancel()
 
@@ -749,18 +775,19 @@ func (b *backend) Health() string {
 	return health.String()
 }
 
-// Heartbeat is called every minute, we log our queue depth to librato
-func (b *backend) Heartbeat() error {
-	rc := b.redisPool.Get()
-	defer rc.Close()
+func (b *backend) reportMetrics(ctx context.Context) (int, error) {
+	metrics := b.stats.Extract().ToMetrics()
 
+	// get queue sizes
+	rc := b.rp.Get()
+	defer rc.Close()
 	active, err := redis.Strings(rc.Do("ZRANGE", fmt.Sprintf("%s:active", msgQueueName), "0", "-1"))
 	if err != nil {
-		return fmt.Errorf("error getting active queues: %w", err)
+		return 0, fmt.Errorf("error getting active queues: %w", err)
 	}
 	throttled, err := redis.Strings(rc.Do("ZRANGE", fmt.Sprintf("%s:throttled", msgQueueName), "0", "-1"))
 	if err != nil {
-		return fmt.Errorf("error getting throttled queues: %w", err)
+		return 0, fmt.Errorf("error getting throttled queues: %w", err)
 	}
 	queues := append(active, throttled...)
 
@@ -770,56 +797,46 @@ func (b *backend) Heartbeat() error {
 		q := fmt.Sprintf("%s/1", queue)
 		count, err := redis.Int(rc.Do("ZCARD", q))
 		if err != nil {
-			return fmt.Errorf("error getting size of priority queue: %s: %w", q, err)
+			return 0, fmt.Errorf("error getting size of priority queue: %s: %w", q, err)
 		}
 		prioritySize += count
 
 		q = fmt.Sprintf("%s/0", queue)
 		count, err = redis.Int(rc.Do("ZCARD", q))
 		if err != nil {
-			return fmt.Errorf("error getting size of bulk queue: %s: %w", q, err)
+			return 0, fmt.Errorf("error getting size of bulk queue: %s: %w", q, err)
 		}
 		bulkSize += count
 	}
 
-	// get our DB and redis stats
+	// calculate DB and redis pool metrics
 	dbStats := b.db.Stats()
-	redisStats := b.redisPool.Stats()
-
+	redisStats := b.rp.Stats()
 	dbWaitDurationInPeriod := dbStats.WaitDuration - b.dbWaitDuration
-	dbWaitCountInPeriod := dbStats.WaitCount - b.dbWaitCount
 	redisWaitDurationInPeriod := redisStats.WaitDuration - b.redisWaitDuration
-	redisWaitCountInPeriod := redisStats.WaitCount - b.redisWaitCount
-
 	b.dbWaitDuration = dbStats.WaitDuration
-	b.dbWaitCount = dbStats.WaitCount
 	b.redisWaitDuration = redisStats.WaitDuration
-	b.redisWaitCount = redisStats.WaitCount
 
-	analytics.Gauge("courier.db_busy", float64(dbStats.InUse))
-	analytics.Gauge("courier.db_idle", float64(dbStats.Idle))
-	analytics.Gauge("courier.db_wait_ms", float64(dbWaitDurationInPeriod/time.Millisecond))
-	analytics.Gauge("courier.db_wait_count", float64(dbWaitCountInPeriod))
-	analytics.Gauge("courier.redis_wait_ms", float64(redisWaitDurationInPeriod/time.Millisecond))
-	analytics.Gauge("courier.redis_wait_count", float64(redisWaitCountInPeriod))
-	analytics.Gauge("courier.bulk_queue", float64(bulkSize))
-	analytics.Gauge("courier.priority_queue", float64(prioritySize))
+	hostDim := cwatch.Dimension("Host", b.config.InstanceID)
+	metrics = append(metrics,
+		cwatch.Datum("DBConnectionsInUse", float64(dbStats.InUse), cwtypes.StandardUnitCount, hostDim),
+		cwatch.Datum("DBConnectionWaitDuration", float64(dbWaitDurationInPeriod)/float64(time.Second), cwtypes.StandardUnitSeconds, hostDim),
+		cwatch.Datum("RedisConnectionsInUse", float64(redisStats.ActiveCount), cwtypes.StandardUnitCount, hostDim),
+		cwatch.Datum("RedisConnectionsWaitDuration", float64(redisWaitDurationInPeriod)/float64(time.Second), cwtypes.StandardUnitSeconds, hostDim),
+		cwatch.Datum("QueuedMsgs", float64(bulkSize), cwtypes.StandardUnitCount, cwatch.Dimension("QueueName", "bulk")),
+		cwatch.Datum("QueuedMsgs", float64(prioritySize), cwtypes.StandardUnitCount, cwatch.Dimension("QueueName", "priority")),
+	)
 
-	slog.Info("current analytics", "db_busy", dbStats.InUse,
-		"db_idle", dbStats.Idle,
-		"db_wait_time", dbWaitDurationInPeriod,
-		"db_wait_count", dbWaitCountInPeriod,
-		"redis_wait_time", dbWaitDurationInPeriod,
-		"redis_wait_count", dbWaitCountInPeriod,
-		"priority_size", prioritySize,
-		"bulk_size", bulkSize)
+	if err := b.cw.Send(ctx, metrics...); err != nil {
+		return 0, fmt.Errorf("error sending metrics: %w", err)
+	}
 
-	return nil
+	return len(metrics), nil
 }
 
 // Status returns information on our queue sizes, number of workers etc..
 func (b *backend) Status() string {
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
 	status := bytes.Buffer{}
@@ -888,12 +905,5 @@ func (b *backend) Status() string {
 
 // RedisPool returns the redisPool for this backend
 func (b *backend) RedisPool() *redis.Pool {
-	return b.redisPool
-}
-
-func checkStorage(s storage.Storage) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	err := s.Test(ctx)
-	cancel()
-	return err
+	return b.rp
 }

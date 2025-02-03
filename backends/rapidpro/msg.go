@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/buger/jsonparser"
-	"github.com/gomodule/redigo/redis"
 	filetype "github.com/h2non/filetype"
 	"github.com/lib/pq"
 	"github.com/nyaruka/courier"
@@ -107,7 +106,7 @@ func newMsg(direction MsgDirection, channel courier.Channel, urn urns.URN, text 
 
 	return &Msg{
 		OrgID_:        dbChannel.OrgID(),
-		UUID_:         courier.MsgUUID(uuids.New()),
+		UUID_:         courier.MsgUUID(uuids.NewV4()),
 		Direction_:    direction,
 		Status_:       courier.MsgStatusPending,
 		Visibility_:   MsgVisible,
@@ -121,10 +120,9 @@ func newMsg(direction MsgDirection, channel courier.Channel, urn urns.URN, text 
 		URN_:          urn,
 		MessageCount_: 1,
 
-		NextAttempt_: now,
-		CreatedOn_:   now,
-		ModifiedOn_:  now,
-		LogUUIDs:     []string{string(clog.UUID())},
+		CreatedOn_:  now,
+		ModifiedOn_: now,
+		LogUUIDs:    []string{string(clog.UUID)},
 
 		channel:        dbChannel,
 		workerToken:    "",
@@ -276,7 +274,7 @@ func writeMsgToDB(ctx context.Context, b *backend, m *Msg, clog *courier.Channel
 	}
 
 	// queue this up to be handled by RapidPro
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 	err = queueMsgHandling(rc, contact, m)
 
@@ -328,7 +326,7 @@ func (b *backend) flushMsgFile(filename string, contents []byte) error {
 
 // checks to see if this message has already been received and if so returns its UUID
 func (b *backend) checkMsgAlreadyReceived(msg *Msg) courier.MsgUUID {
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
 	// if we have an external id use that
@@ -358,23 +356,32 @@ func (b *backend) checkMsgAlreadyReceived(msg *Msg) courier.MsgUUID {
 
 // records that the given message has been received and written to the database
 func (b *backend) recordMsgReceived(msg *Msg) {
-	rc := b.redisPool.Get()
+	rc := b.rp.Get()
 	defer rc.Close()
 
 	if msg.ExternalID_ != "" {
 		fingerprint := fmt.Sprintf("%s|%s|%s", msg.Channel().UUID(), msg.URN().Identity(), msg.ExternalID())
 
-		b.receivedExternalIDs.Set(rc, fingerprint, string(msg.UUID()))
+		if err := b.receivedExternalIDs.Set(rc, fingerprint, string(msg.UUID())); err != nil {
+			slog.Error("error recording received external id", "msg", msg.UUID(), "error", err)
+		}
 	} else {
 		fingerprint := fmt.Sprintf("%s|%s", msg.Channel().UUID(), msg.URN().Identity())
 
-		b.receivedMsgs.Set(rc, fingerprint, fmt.Sprintf("%s|%s", msg.UUID(), msg.hash()))
+		if err := b.receivedMsgs.Set(rc, fingerprint, fmt.Sprintf("%s|%s", msg.UUID(), msg.hash())); err != nil {
+			slog.Error("error recording received msg", "msg", msg.UUID(), "error", err)
+		}
 	}
 }
 
 // clearMsgSeen clears our seen incoming messages for the passed in channel and URN
-func (b *backend) clearMsgSeen(rc redis.Conn, msg *Msg) {
+func (b *backend) clearMsgSeen(msg *Msg) {
+	rc := b.rp.Get()
+	defer rc.Close()
+
 	fingerprint := fmt.Sprintf("%s|%s", msg.Channel().UUID(), msg.URN().Identity())
 
-	b.receivedMsgs.Del(rc, fingerprint)
+	if err := b.receivedMsgs.Del(rc, fingerprint); err != nil {
+		slog.Error("error clearing received msgs", "urn", msg.URN().Identity(), "error", err)
+	}
 }
