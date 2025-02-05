@@ -8,6 +8,8 @@ import (
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/test"
+	"github.com/nyaruka/courier/utils/clogs"
+	"github.com/nyaruka/gocommon/dates"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
@@ -23,7 +25,7 @@ func TestChannelLog(t *testing.T) {
 	}))
 	defer httpx.SetRequestor(httpx.DefaultRequestor)
 
-	uuids.SetGenerator(uuids.NewSeededGenerator(1234))
+	uuids.SetGenerator(uuids.NewSeededGenerator(1234, dates.NewSequentialNow(time.Date(2024, 9, 11, 14, 33, 0, 0, time.UTC), time.Second)))
 	defer uuids.SetGenerator(uuids.DefaultGenerator)
 
 	channel := test.NewMockChannel("fef91e9b-a6ed-44fb-b6ce-feed8af585a8", "NX", "1234", "US", []string{urns.Phone.Prefix}, nil)
@@ -42,49 +44,46 @@ func TestChannelLog(t *testing.T) {
 	assert.EqualError(t, err, "unable to connect to server")
 
 	clog.HTTP(trace)
-	clog.Error(courier.NewChannelError("not_right", "", "Something not right"))
+	clog.Error(clogs.NewLogError("not_right", "", "Something not right"))
 	clog.RawError(errors.New("this is an error"))
 	clog.End()
 
-	assert.Equal(t, courier.ChannelLogUUID("c00e5d67-c275-4389-aded-7d8b151cbd5b"), clog.UUID())
-	assert.Equal(t, courier.ChannelLogTypeTokenRefresh, clog.Type())
+	assert.Equal(t, clogs.LogUUID("0191e180-7d60-7000-aded-7d8b151cbd5b"), clog.UUID)
+	assert.Equal(t, courier.ChannelLogTypeTokenRefresh, clog.Type)
 	assert.Equal(t, channel, clog.Channel())
 	assert.False(t, clog.Attached())
-	assert.Equal(t, 2, len(clog.HTTPLogs()))
-	assert.Equal(t, 2, len(clog.Errors()))
-	assert.False(t, clog.CreatedOn().IsZero())
-	assert.Greater(t, clog.Elapsed(), time.Duration(0))
+	assert.Equal(t, 2, len(clog.HttpLogs))
+	assert.Equal(t, 2, len(clog.Errors))
+	assert.False(t, clog.CreatedOn.IsZero())
+	assert.Greater(t, clog.Elapsed, time.Duration(0))
 
-	hlog1 := clog.HTTPLogs()[0]
+	hlog1 := clog.HttpLogs[0]
 	assert.Equal(t, "https://api.messages.com/send.json", hlog1.URL)
 	assert.Equal(t, 200, hlog1.StatusCode)
 	assert.Equal(t, "POST /send.json HTTP/1.1\r\nHost: api.messages.com\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 0\r\nAccept-Encoding: gzip\r\n\r\n", hlog1.Request)
 	assert.Equal(t, "HTTP/1.0 200 OK\r\nContent-Length: 20\r\n\r\n{\"status\":\"success\"}", hlog1.Response)
 
-	hlog2 := clog.HTTPLogs()[1]
+	hlog2 := clog.HttpLogs[1]
 	assert.Equal(t, 0, hlog2.StatusCode)
 	assert.Equal(t, "POST /send.json HTTP/1.1\r\nHost: api.messages.com\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 0\r\nAccept-Encoding: gzip\r\n\r\n", hlog2.Request)
 	assert.Equal(t, "", hlog2.Response)
 
-	err1 := clog.Errors()[0]
-	assert.Equal(t, "not_right", err1.Code())
-	assert.Equal(t, "", err1.ExtCode())
-	assert.Equal(t, "Something not right", err1.Message())
+	err1 := clog.Errors[0]
+	assert.Equal(t, "not_right", err1.Code)
+	assert.Equal(t, "", err1.ExtCode)
+	assert.Equal(t, "Something not right", err1.Message)
 
-	err2 := clog.Errors()[1]
-	assert.Equal(t, "this is an error", err2.Message())
-	assert.Equal(t, "", err2.Code())
+	err2 := clog.Errors[1]
+	assert.Equal(t, "this is an error", err2.Message)
+	assert.Equal(t, "", err2.Code)
 
 	clog.SetAttached(true)
-	clog.SetType(courier.ChannelLogTypeEventReceive)
-
 	assert.True(t, clog.Attached())
-	assert.Equal(t, courier.ChannelLogTypeEventReceive, clog.Type())
 }
 
 func TestChannelErrors(t *testing.T) {
 	tcs := []struct {
-		err             *courier.ChannelError
+		err             *clogs.LogError
 		expectedCode    string
 		expectedExtCode string
 		expectedMessage string
@@ -139,8 +138,8 @@ func TestChannelErrors(t *testing.T) {
 	}
 
 	for _, tc := range tcs {
-		assert.Equal(t, tc.expectedCode, tc.err.Code())
-		assert.Equal(t, tc.expectedExtCode, tc.err.ExtCode())
-		assert.Equal(t, tc.expectedMessage, tc.err.Message())
+		assert.Equal(t, tc.expectedCode, tc.err.Code)
+		assert.Equal(t, tc.expectedExtCode, tc.err.ExtCode)
+		assert.Equal(t, tc.expectedMessage, tc.err.Message)
 	}
 }

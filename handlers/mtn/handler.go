@@ -77,7 +77,7 @@ type moPayload struct {
 // receiveEvent is our HTTP handler function for incoming messages
 func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
 	if payload.Message != "" {
-		clog.SetType(courier.ChannelLogTypeMsgReceive)
+		clog.Type = courier.ChannelLogTypeMsgReceive
 
 		date := time.Unix(payload.Created/1000, payload.Created%1000*1000000).UTC()
 		urn, err := urns.ParsePhone(payload.From, channel.Country(), true, false)
@@ -90,7 +90,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
 
 	} else {
-		clog.SetType(courier.ChannelLogTypeMsgStatus)
+		clog.Type = courier.ChannelLogTypeMsgStatus
 
 		if payload.TransactionID == "" {
 			return nil, handlers.WriteAndLogRequestIgnored(ctx, h, channel, w, r, "missing transactionId, ignored")
@@ -121,7 +121,7 @@ type mtPayload struct {
 }
 
 func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
-	accessToken, err := h.getAccessToken(ctx, msg.Channel(), clog)
+	accessToken, err := h.getAccessToken(msg.Channel(), clog)
 	if err != nil {
 		return courier.ErrChannelConfig
 	}
@@ -175,16 +175,18 @@ func (h *handler) RedactValues(ch courier.Channel) []string {
 	}
 }
 
-func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, clog *courier.ChannelLog) (string, error) {
-	rc := h.Backend().RedisPool().Get()
-	defer rc.Close()
-
+func (h *handler) getAccessToken(channel courier.Channel, clog *courier.ChannelLog) (string, error) {
 	tokenKey := fmt.Sprintf("channel-token:%s", channel.UUID())
 
 	h.fetchTokenMutex.Lock()
 	defer h.fetchTokenMutex.Unlock()
 
-	token, err := redis.String(rc.Do("GET", tokenKey))
+	var token string
+	var err error
+	h.WithRedisConn(func(rc redis.Conn) {
+		token, err = redis.String(rc.Do("GET", tokenKey))
+	})
+
 	if err != nil && err != redis.ErrNil {
 		return "", fmt.Errorf("error reading cached access token: %w", err)
 	}
@@ -193,12 +195,15 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 		return token, nil
 	}
 
-	token, expires, err := h.fetchAccessToken(ctx, channel, clog)
+	token, expires, err := h.fetchAccessToken(channel, clog)
 	if err != nil {
 		return "", fmt.Errorf("error fetching new access token: %w", err)
 	}
 
-	_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
+	h.WithRedisConn(func(rc redis.Conn) {
+		_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
+	})
+
 	if err != nil {
 		return "", fmt.Errorf("error updating cached access token: %w", err)
 	}
@@ -207,7 +212,7 @@ func (h *handler) getAccessToken(ctx context.Context, channel courier.Channel, c
 }
 
 // fetchAccessToken tries to fetch a new token for our channel, setting the result in redis
-func (h *handler) fetchAccessToken(ctx context.Context, channel courier.Channel, clog *courier.ChannelLog) (string, time.Duration, error) {
+func (h *handler) fetchAccessToken(channel courier.Channel, clog *courier.ChannelLog) (string, time.Duration, error) {
 	form := url.Values{
 		"client_id":     []string{channel.StringConfigForKey(courier.ConfigAPIKey, "")},
 		"client_secret": []string{channel.StringConfigForKey(courier.ConfigAuthToken, "")},

@@ -170,12 +170,15 @@ func (mb *MockBackend) ClearMsgSent(ctx context.Context, id courier.MsgID) error
 	return nil
 }
 
-// MarkOutgoingMsgComplete marks the passed msg as having been dealt with
-func (mb *MockBackend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.MsgOut, s courier.StatusUpdate) {
+// OnSendComplete marks the passed msg as having been dealt with
+func (mb *MockBackend) OnSendComplete(ctx context.Context, msg courier.MsgOut, s courier.StatusUpdate, clog *courier.ChannelLog) {
 	mb.mutex.Lock()
 	defer mb.mutex.Unlock()
 
 	mb.sentMsgs[msg.ID()] = true
+}
+
+func (mb *MockBackend) OnReceiveComplete(ctx context.Context, ch courier.Channel, events []courier.Event, clog *courier.ChannelLog) {
 }
 
 // WriteChannelLog writes the passed in channel log to the DB
@@ -299,7 +302,7 @@ func (mb *MockBackend) GetChannelByAddress(ctx context.Context, cType courier.Ch
 func (mb *MockBackend) GetContact(ctx context.Context, channel courier.Channel, urn urns.URN, authTokens map[string]string, name string, clog *courier.ChannelLog) (courier.Contact, error) {
 	contact, found := mb.contacts[urn]
 	if !found {
-		contact = &mockContact{channel, urn, authTokens, courier.ContactUUID(uuids.New())}
+		contact = &mockContact{channel, urn, authTokens, courier.ContactUUID(uuids.NewV4())}
 		mb.contacts[urn] = contact
 	}
 	return contact, nil
@@ -341,7 +344,7 @@ func (mb *MockBackend) SaveAttachment(ctx context.Context, ch courier.Channel, c
 
 	time.Sleep(time.Millisecond * 2)
 
-	return fmt.Sprintf("https://backend.com/attachments/%s.%s", uuids.New(), extension), nil
+	return fmt.Sprintf("https://backend.com/attachments/%s.%s", uuids.NewV4(), extension), nil
 }
 
 // ResolveMedia resolves the passed in media URL to a media object
@@ -370,11 +373,6 @@ func (mb *MockBackend) HttpAccess() *httpx.AccessConfig {
 // Status returns a string describing the status of the service, queue size etc..
 func (mb *MockBackend) Status() string {
 	return "ALL GOOD"
-}
-
-// Heartbeat is a noop for our mock backend
-func (mb *MockBackend) Heartbeat() error {
-	return nil
 }
 
 // RedisPool returns the redisPool for this backend
