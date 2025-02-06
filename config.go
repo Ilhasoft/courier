@@ -36,6 +36,7 @@ type Config struct {
 
 	DynamoEndpoint    string `help:"DynamoDB service endpoint, e.g. https://dynamodb.us-east-1.amazonaws.com"`
 	DynamoTablePrefix string `help:"prefix to use for DynamoDB tables"`
+	DynamoAWSRegion   string `help:"region to use for DynamoDB services, e.g. us-east-1"`
 
 	S3Endpoint          string `help:"S3 service endpoint, e.g. https://s3.amazonaws.com"`
 	S3AttachmentsBucket string `help:"S3 bucket to write attachments to"`
@@ -87,6 +88,7 @@ func NewDefaultConfig() *Config {
 
 		DynamoEndpoint:    "", // let library generate it
 		DynamoTablePrefix: "Temba",
+		DynamoAWSRegion:   "us-east-1",
 
 		S3Endpoint:          "https://s3.amazonaws.com",
 		S3AttachmentsBucket: "temba-attachments",

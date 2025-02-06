@@ -174,7 +174,7 @@ func (b *backend) Start() error {
 	}
 
 	// setup DynamoDB
-	b.dynamo, err = dynamo.NewService(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.AWSRegion, b.config.DynamoEndpoint, b.config.DynamoTablePrefix)
+	b.dynamo, err = dynamo.NewService(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.DynamoAWSRegion, b.config.DynamoEndpoint, b.config.DynamoTablePrefix)
 	if err != nil {
 		return err
 	}
