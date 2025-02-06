@@ -1,3 +1,7 @@
+1.5.11-courier-10.0.0
+----------
+  * Add Dynamo AWS region config variable
+
 1.5.10-courier-10.0.0
 ----------
   * Update to v10.0.0
