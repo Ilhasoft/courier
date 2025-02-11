@@ -1,3 +1,7 @@
+1.5.12-courier-10.0.0
+----------
+  * Update sentry-go and slog-sentry packages
+
 1.5.11-courier-10.0.0
 ----------
   * Add Dynamo AWS region config variable
