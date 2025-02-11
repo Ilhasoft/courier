@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.38.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.71.0
 	github.com/buger/jsonparser v1.1.1
-	github.com/getsentry/sentry-go v0.30.0
+	github.com/getsentry/sentry-go v0.31.1
 	github.com/go-chi/chi/v5 v5.2.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/gomodule/redigo v1.9.2
@@ -29,6 +29,8 @@ require (
 	golang.org/x/oauth2 v0.24.0
 	gopkg.in/go-playground/validator.v9 v9.31.0
 )
+
+require github.com/samber/slog-common v0.18.1 // indirect
 
 require (
 	cloud.google.com/go/compute/metadata v0.6.0 // indirect
@@ -72,6 +74,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/samber/lo v1.47.0 // indirect
+	github.com/samber/slog-sentry/v2 v2.9.3
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.0
 	golang.org/x/crypto v0.31.0 // indirect
