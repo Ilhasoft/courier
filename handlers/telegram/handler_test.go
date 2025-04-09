@@ -15,6 +15,7 @@ import (
 	"github.com/nyaruka/courier/utils/clogs"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
+	"github.com/stretchr/testify/assert"
 )
 
 var helloMsg = `{
@@ -795,6 +796,20 @@ var outgoingCases = []OutgoingTestCase{
 		ExpectedExtIDs: []string{"133"},
 	},
 	{
+		Label:   "Parse Mode Markdown",
+		MsgText: "Plain Send With _Italic_ & *Bold* text & text_with_underscore & 1*1=1",
+		MsgURN:  "telegram:12345",
+		MockResponses: map[string][]*httpx.MockResponse{
+			"*/botauth_token/sendMessage": {
+				httpx.NewMockResponse(200, nil, []byte(`{ "ok": true, "result": { "message_id": 133 } }`)),
+			},
+		},
+		ExpectedRequests: []ExpectedRequest{
+			{Form: url.Values{"text": {"Plain Send With _Italic_ & *Bold* text & text\\_with\\_underscore & 1\\*1=1"}, "chat_id": {"12345"}, "parse_mode": []string{"Markdown"}, "reply_markup": {`{"remove_keyboard":true}`}}},
+		},
+		ExpectedExtIDs: []string{"133"},
+	},
+	{
 		Label:           "Quick Reply",
 		MsgText:         "Are you happy?",
 		MsgURN:          "telegram:12345",
@@ -935,4 +950,13 @@ func TestOutgoing(t *testing.T) {
 	)
 
 	RunOutgoingTestCases(t, ch, newHandler(), outgoingCases, []string{"auth_token"}, nil)
+}
+
+func TestEscapeMarkdown(t *testing.T) {
+	text := `This is a string with_underscores and words_without, - so one _ outside _now now_ and _now_ https://meusite.com/do_checkout i know_ *BOLD* not*bold [secret] is cold $!@#`
+
+	result := escapeTextForMarkdown(text)
+
+	expected := `This is a string with\_underscores and words\_without, - so one _ outside _now now_ and _now_ https://meusite.com/do\_checkout i know_ *BOLD* not\*bold \[secret\] is cold $!@#`
+	assert.Equal(t, result, expected)
 }
