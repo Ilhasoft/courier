@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -213,7 +214,9 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 			msgKeyBoard = keyboard
 		}
 
-		form := url.Values{"chat_id": []string{msg.URN().Path()}, "text": []string{msg.Text()}}
+		msgText := escapeTextForMarkdown(msg.Text())
+
+		form := url.Values{"chat_id": []string{msg.URN().Path()}, "text": []string{msgText}}
 
 		externalID, err := h.sendMsgPart(msg, authToken, "sendMessage", form, msgKeyBoard, clog)
 		if err != nil {
@@ -403,4 +406,20 @@ type moPayload struct {
 			LastName    string `json:"last_name"`
 		}
 	} `json:"message"`
+}
+
+func escapeTextForMarkdown(text string) string {
+	escaped := regexReplace(`(?i)\b\w+_(?i)\w+\b`, `_`, `\_`, text)
+	escaped = regexReplace(`\b\w+\*\w+\b`, `\*`, `\*`, escaped)
+	escaped = strings.ReplaceAll(escaped, "[", "\\[")
+	escaped = strings.ReplaceAll(escaped, "]", "\\]")
+	escaped = strings.ReplaceAll(escaped, "`", "\\`")
+	return escaped
+}
+
+func regexReplace(regexstr, target, replacement, text string) string {
+	re := regexp.MustCompile(regexstr)
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		return regexp.MustCompile(target).ReplaceAllString(match, replacement)
+	})
 }

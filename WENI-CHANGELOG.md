@@ -1,3 +1,7 @@
+1.5.13-courier-10.0.0
+----------
+  * Implement Markdown text escaping in Telegram handler and add corresponding tests
+
 1.5.12-courier-10.0.0
 ----------
   * Update sentry-go and slog-sentry packages
