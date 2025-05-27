@@ -124,7 +124,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 	err = json.Unmarshal(respBody, responseData)
 	if err != nil {
 		clog.Error(clogs.NewLogError("response_unparseable", "", "Unable to parse response body from Messangi"))
-		return err
+		return courier.ErrResponseUnparseable
 	}
 
 	// check if message was accepted and we have a message ID
