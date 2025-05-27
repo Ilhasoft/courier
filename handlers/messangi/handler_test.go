@@ -19,7 +19,7 @@ var testChannels = []courier.Channel{
 }
 
 const (
-	receiveURL = "/c/mgn/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive/"
+	receiveURL = "/c/mg/8eb23e93-5ecb-45ba-b726-3b064e0c56ab/receive/"
 )
 
 var testCases = []IncomingTestCase{
