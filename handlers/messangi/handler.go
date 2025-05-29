@@ -1,29 +1,18 @@
 package messangi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
-
-	"encoding/base64"
-	"encoding/xml"
+	"time"
 
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
-	"github.com/nyaruka/courier/utils"
-)
-
-const (
-	configPublicKey  = "public_key"
-	configPrivateKey = "private_key"
-	configInstanceId = "instance_id"
-	configCarrierId  = "carrier_id"
-)
-
-var (
-	maxMsgLength = 160
-	sendURL      = "https://flow.messangi.me/mmc/rest/api/sendMT"
+	"github.com/nyaruka/courier/utils/clogs"
+	"github.com/nyaruka/gocommon/urns"
 )
 
 func init() {
@@ -38,69 +27,117 @@ func newHandler() courier.ChannelHandler {
 	return &handler{handlers.NewBaseHandler(courier.ChannelType("MG"), "Messangi")}
 }
 
+type moPayload struct {
+	Owner      string `json:"owner"`
+	Date       string `json:"date"`
+	ProcessID  string `json:"processId"`
+	Origin     string `json:"origin"`
+	ExternalID string `json:"externalId"`
+	Callback   string `json:"callback"`
+	Connection string `json:"connection"`
+	ID         string `json:"id"`
+	Text       string `json:"text"`
+	User       string `json:"user"`
+	ExtraInfo  any    `json:"extraInfo"`
+}
+
 // Initialize is called by the engine once everything is loaded
 func (h *handler) Initialize(s courier.Server) error {
 	h.SetServer(s)
-	receiveHandler := handlers.NewTelReceiveHandler(h, "mobile", "mo")
+	receiveHandler := handlers.JSONPayload(h, h.receiveMessage)
 	s.AddHandlerRoute(h, http.MethodPost, "receive", courier.ChannelLogTypeMsgReceive, receiveHandler)
 	return nil
 }
 
-// <response>
-//
-//	<input>sendMT</input>
-//	<status>OK</status>
-//	<description>Completed</description>
-//
-// </response>
-type mtResponse struct {
-	Input       string `xml:"input"`
-	Status      string `xml:"status"`
-	Description string `xml:"description"`
+func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w http.ResponseWriter, r *http.Request, payload *moPayload, clog *courier.ChannelLog) ([]courier.Event, error) {
+	// validate required fields
+	if payload.User == "" {
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("missing required field 'user'"))
+	}
+	if payload.Text == "" {
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("missing required field 'text'"))
+	}
+
+	// parse the date
+	date := time.Now()
+	if payload.Date != "" {
+		if parsedDate, err := time.Parse(time.RFC3339, payload.Date); err == nil {
+			date = parsedDate
+		}
+	}
+
+	// create our URN
+	urn, err := urns.ParsePhone(payload.User, channel.Country(), true, false)
+	if err != nil {
+		return nil, handlers.WriteAndLogRequestError(ctx, h, channel, w, r, err)
+	}
+
+	// create our message
+	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Text, payload.ID, clog).WithReceivedOn(date)
+
+	// and finally write our message
+	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
 }
 
 func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.SendResult, clog *courier.ChannelLog) error {
-	publicKey := msg.Channel().StringConfigForKey(configPublicKey, "")
-	privateKey := msg.Channel().StringConfigForKey(configPrivateKey, "")
-	instanceId := msg.Channel().IntConfigForKey(configInstanceId, -1)
-	carrierId := msg.Channel().IntConfigForKey(configCarrierId, -1)
-	if publicKey == "" || privateKey == "" || instanceId == -1 || carrierId == -1 {
+	// get our access token
+	accessToken := msg.Channel().StringConfigForKey(courier.ConfigAuthToken, "")
+	if accessToken == "" {
 		return courier.ErrChannelConfig
 	}
 
-	parts := handlers.SplitMsgByChannel(msg.Channel(), handlers.GetTextAndAttachments(msg), maxMsgLength)
-	for _, part := range parts {
-		shortcode := strings.TrimPrefix(msg.Channel().Address(), "+")
-		to := strings.TrimPrefix(msg.URN().Path(), "+")
-		textBase64 := base64.RawURLEncoding.EncodeToString([]byte(part))
-		params := fmt.Sprintf("%d/%s/%d/%s/%s", instanceId, shortcode, carrierId, to, textBase64)
-		signature := utils.SignHMAC256(privateKey, params)
-		fullURL := fmt.Sprintf("%s/%s/%s/%s", sendURL, params, publicKey, signature)
-
-		req, err := http.NewRequest(http.MethodGet, fullURL, nil)
-		if err != nil {
-			return err
-		}
-
-		resp, respBody, err := h.RequestHTTP(req, clog)
-		if err != nil || resp.StatusCode/100 == 5 {
-			return courier.ErrConnectionFailed
-		} else if resp.StatusCode/100 != 2 {
-			return courier.ErrResponseStatus
-		}
-
-		// parse our response as XML
-		response := &mtResponse{}
-		err = xml.Unmarshal(respBody, response)
-		if err != nil {
-			return courier.ErrResponseUnparseable
-		}
-
-		// we always get 204 on success
-		if response.Status != "OK" {
-			return courier.ErrResponseStatus
-		}
+	// build our request
+	form := map[string]interface{}{
+		"from": msg.Channel().Address(),
+		"to":   strings.TrimPrefix(msg.URN().Path(), "+"),
+		"text": msg.Text(),
+		"type": "MT",
 	}
 
-	return nil
+	// build our URL and request
+	url := "https://elastic.messangi.me/raven/v2/messages"
+	jsonBody, err := json.Marshal(form)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
+	resp, respBody, err := h.RequestHTTP(req, clog)
+	if err != nil || resp.StatusCode/100 == 5 {
+		return courier.ErrConnectionFailed
+	} else if resp.StatusCode/100 != 2 {
+		return courier.ErrResponseStatus
+	}
+
+	// parse our response
+	responseData := &struct {
+		Status      string `json:"status"`
+		MessageID   string `json:"messageId"`
+		Description string `json:"description"`
+	}{}
+
+	err = json.Unmarshal(respBody, responseData)
+	if err != nil {
+		clog.Error(clogs.NewLogError("response_unparseable", "", "Unable to parse response body from Messangi"))
+		return courier.ErrResponseUnparseable
+	}
+
+	// check if message was accepted and we have a message ID
+	if responseData.Status == "ACCEPTED" && responseData.MessageID != "" {
+		res.AddExternalID(responseData.MessageID)
+		return nil
+	}
+
+	// this was a failure, log the description if available
+	if responseData.Description != "" {
+		clog.Error(clogs.NewLogError("messangi_error", "", "Messangi API error: %s", responseData.Description))
+	} else {
+		clog.Error(clogs.NewLogError("message_not_accepted", "", "Message not accepted by Messangi"))
+	}
+	return courier.ErrResponseStatus
 }
