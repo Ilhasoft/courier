@@ -1,3 +1,7 @@
+1.6.0-courier-10.0.0
+----------
+  * Add new Messangi handler for message processing
+
 1.5.13-courier-10.0.0
 ----------
   * Implement Markdown text escaping in Telegram handler and add corresponding tests
