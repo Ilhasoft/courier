@@ -73,8 +73,20 @@ func insertContact(tx *sqlx.Tx, contact *DBContact) error {
 	defer rows.Close()
 	if rows.Next() {
 		err = rows.Scan(&contact.ID_)
+		if err != nil {
+			return errors.Wrap(err, "error scanning contact id")
+		}
+	} else {
+		// If no rows were returned, this indicates a problem with the INSERT
+		return errors.New("no rows returned from contact insert, contact may not have been created")
 	}
-	return err
+
+	// Check if there was an error during iteration
+	if err = rows.Err(); err != nil {
+		return errors.Wrap(err, "error iterating over insert result")
+	}
+
+	return nil
 }
 
 const lookupContactFromURNSQL = `
