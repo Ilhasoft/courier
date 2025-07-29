@@ -92,7 +92,7 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 
 	// build message
 	date := time.Unix(ts, 0).UTC()
-	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Message.Text, "", clog).WithReceivedOn(date).WithContactName(payload.From)
+	msg := h.Backend().NewIncomingMsg(ctx, channel, urn, payload.Message.Text, "", clog).WithReceivedOn(date).WithContactName(payload.From)
 	if mediaURL != "" {
 		msg.WithAttachment(mediaURL)
 	}
@@ -130,7 +130,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 
 	sendURL := fmt.Sprintf("%s/send", baseURL)
 
-	payload := newOutgoingMessage("message", msg.URN().Path(), msg.Channel().Address(), msg.QuickReplies())
+	payload := newOutgoingMessage("message", msg.URN().Path(), msg.Channel().Address(), handlers.TextOnlyQuickReplies(msg.QuickReplies()))
 	lenAttachments := len(msg.Attachments())
 	if lenAttachments > 0 {
 
@@ -172,7 +172,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 
 			// add quickreplies on last message
 			if i == lenAttachments-1 {
-				payload.Message.QuickReplies = msg.QuickReplies()
+				payload.Message.QuickReplies = handlers.TextOnlyQuickReplies(msg.QuickReplies())
 			}
 
 			// build request
@@ -200,7 +200,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 			Type:         "text",
 			TimeStamp:    getTimestamp(),
 			Text:         msg.Text(),
-			QuickReplies: msg.QuickReplies(),
+			QuickReplies: handlers.TextOnlyQuickReplies(msg.QuickReplies()),
 		}
 		// build request
 		body, err := json.Marshal(&payload)

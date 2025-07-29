@@ -92,8 +92,8 @@ var defaultSendTestCases = []OutgoingTestCase{
 			},
 			Body: `{"from":"12345","text":"Error Message","to":"5588999999999","type":"MT"}`,
 		}},
-		ExpectedLogErrors: []*clogs.LogError{
-			clogs.NewLogError("messangi_error", "", "Messangi API error: Invalid recipient number"),
+		ExpectedLogErrors: []*clogs.Error{
+			&clogs.Error{Code: "messangi_error", Message: "Messangi API error: Invalid recipient number"},
 		},
 		ExpectedError: courier.ErrResponseStatus,
 	},
@@ -131,8 +131,8 @@ var defaultSendTestCases = []OutgoingTestCase{
 			},
 			Body: `{"from":"12345","text":"Invalid JSON","to":"5588999999999","type":"MT"}`,
 		}},
-		ExpectedLogErrors: []*clogs.LogError{
-			clogs.NewLogError("response_unparseable", "", "Unable to parse response body from Messangi"),
+		ExpectedLogErrors: []*clogs.Error{
+			&clogs.Error{Code: "response_unparseable", Message: "Unable to parse response body from Messangi"},
 		},
 		ExpectedError: courier.ErrResponseUnparseable,
 	},
