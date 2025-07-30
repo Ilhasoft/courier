@@ -1,3 +1,7 @@
+1.7.0-courier-10.2.0
+----------
+  * Update to v10.2.0
+
 1.6.0-courier-10.0.0
 ----------
   * Add new Messangi handler for message processing
