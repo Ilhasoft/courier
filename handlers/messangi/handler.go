@@ -73,7 +73,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our message
-	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Text, payload.ID, clog).WithReceivedOn(date)
+	msg := h.Backend().NewIncomingMsg(ctx, channel, urn, payload.Text, payload.ID, clog).WithReceivedOn(date)
 
 	// and finally write our message
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
@@ -123,7 +123,7 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 
 	err = json.Unmarshal(respBody, responseData)
 	if err != nil {
-		clog.Error(clogs.NewLogError("response_unparseable", "", "Unable to parse response body from Messangi"))
+		clog.Error(&clogs.Error{Code: "response_unparseable", Message: "Unable to parse response body from Messangi"})
 		return courier.ErrResponseUnparseable
 	}
 
@@ -135,9 +135,9 @@ func (h *handler) Send(ctx context.Context, msg courier.MsgOut, res *courier.Sen
 
 	// this was a failure, log the description if available
 	if responseData.Description != "" {
-		clog.Error(clogs.NewLogError("messangi_error", "", "Messangi API error: %s", responseData.Description))
+		clog.Error(&clogs.Error{Code: "messangi_error", Message: fmt.Sprintf("Messangi API error: %s", responseData.Description)})
 	} else {
-		clog.Error(clogs.NewLogError("message_not_accepted", "", "Message not accepted by Messangi"))
+		clog.Error(&clogs.Error{Code: "message_not_accepted", Message: "Message not accepted by Messangi"})
 	}
 	return courier.ErrResponseStatus
 }

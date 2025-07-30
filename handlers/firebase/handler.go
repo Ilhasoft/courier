@@ -92,7 +92,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// build our msg
-	dbMsg := h.Backend().NewIncomingMsg(channel, urn, form.Msg, "", clog).WithReceivedOn(date).WithContactName(form.Name).WithURNAuthTokens(authTokens)
+	dbMsg := h.Backend().NewIncomingMsg(ctx, channel, urn, form.Msg, "", clog).WithReceivedOn(date).WithContactName(form.Name).WithURNAuthTokens(authTokens)
 
 	// and finally write our message
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{dbMsg}, w, r, clog)
@@ -119,7 +119,7 @@ func (h *handler) registerContact(ctx context.Context, channel courier.Channel, 
 	}
 
 	// create our contact
-	contact, err := h.Backend().GetContact(ctx, channel, urn, map[string]string{"default": form.FCMToken}, form.Name, clog)
+	contact, err := h.Backend().GetContact(ctx, channel, urn, map[string]string{"default": form.FCMToken}, form.Name, true, clog)
 	if err != nil {
 		return nil, err
 	}
@@ -199,11 +199,13 @@ func (h *handler) sendWithAPIKey(msg courier.MsgOut, res *courier.SendResult, cl
 		payload.Data.Title = title
 		payload.Data.Message = part
 		payload.Data.MessageID = int64(msg.ID())
-		payload.Data.SessionStatus = msg.SessionStatus()
+		if msg.Session() != nil {
+			payload.Data.SessionStatus = msg.Session().Status
+		}
 
 		// include any quick replies on the last piece we send
 		if i == len(msgParts)-1 {
-			payload.Data.QuickReplies = msg.QuickReplies()
+			payload.Data.QuickReplies = handlers.TextOnlyQuickReplies(msg.QuickReplies())
 		}
 
 		payload.To = msg.URNAuth()
@@ -238,12 +240,12 @@ func (h *handler) sendWithAPIKey(msg courier.MsgOut, res *courier.SendResult, cl
 		// was this successful
 		success, _ := jsonparser.GetInt(respBody, "success")
 		if success != 1 {
-			return courier.ErrResponseUnexpected
+			return courier.ErrResponseContent
 		}
 
 		externalID, err := jsonparser.GetInt(respBody, "multicast_id")
 		if err != nil {
-			return courier.ErrResponseUnexpected
+			return courier.ErrResponseContent
 		}
 		res.AddExternalID(fmt.Sprintf("%d", externalID))
 
@@ -281,11 +283,13 @@ func (h *handler) sendWithCredsJSON(msg courier.MsgOut, res *courier.SendResult,
 		payload.Message.Data.Title = title
 		payload.Message.Data.Message = part
 		payload.Message.Data.MessageID = msg.ID().String()
-		payload.Message.Data.SessionStatus = msg.SessionStatus()
+		if msg.Session() != nil {
+			payload.Message.Data.SessionStatus = msg.Session().Status
+		}
 
 		if i == len(msgParts)-1 {
 			if msg.QuickReplies() != nil {
-				payload.Message.Data.QuickReplies = string(jsonx.MustMarshal(msg.QuickReplies()))
+				payload.Message.Data.QuickReplies = string(jsonx.MustMarshal(handlers.TextOnlyQuickReplies(msg.QuickReplies())))
 			}
 		}
 
@@ -319,15 +323,15 @@ func (h *handler) sendWithCredsJSON(msg courier.MsgOut, res *courier.SendResult,
 
 		responseName, err := jsonparser.GetString(respBody, "name")
 		if err != nil {
-			return courier.ErrResponseUnexpected
+			return courier.ErrResponseContent
 		}
 
 		if !strings.Contains(responseName, fmt.Sprintf("projects/%s/messages/", projectID)) {
-			return courier.ErrResponseUnexpected
+			return courier.ErrResponseContent
 		}
 		externalID := strings.TrimLeft(responseName, fmt.Sprintf("projects/%s/messages/", projectID))
 		if externalID == "" {
-			return courier.ErrResponseUnexpected
+			return courier.ErrResponseContent
 		}
 
 		res.AddExternalID(externalID)
@@ -345,7 +349,7 @@ func (h *handler) getAccessToken(channel courier.Channel) (string, error) {
 
 	var token string
 	var err error
-	h.WithRedisConn(func(rc redis.Conn) {
+	h.WithValkeyConn(func(rc redis.Conn) {
 		token, err = redis.String(rc.Do("GET", tokenKey))
 	})
 
@@ -362,7 +366,7 @@ func (h *handler) getAccessToken(channel courier.Channel) (string, error) {
 		return "", fmt.Errorf("error fetching new access token: %w", err)
 	}
 
-	h.WithRedisConn(func(rc redis.Conn) {
+	h.WithValkeyConn(func(rc redis.Conn) {
 		_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
 	})
 
@@ -373,7 +377,7 @@ func (h *handler) getAccessToken(channel courier.Channel) (string, error) {
 	return token, nil
 }
 
-// fetchAccessToken tries to fetch a new token for our channel, setting the result in redis
+// fetchAccessToken tries to fetch a new token for our channel, setting the result in valkey
 func (h *handler) fetchAccessToken(channel courier.Channel) (string, time.Duration, error) {
 	credentialsJSONRaw := channel.ConfigForKey(configCredentialsFile, nil)
 	credentialsJSON, _ := credentialsJSONRaw.(map[string]any)

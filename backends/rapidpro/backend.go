@@ -35,7 +35,7 @@ import (
 	"github.com/nyaruka/gocommon/syncx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
-	"github.com/nyaruka/redisx"
+	"github.com/nyaruka/vkutil"
 )
 
 // the name for our message queue
@@ -54,15 +54,15 @@ type backend struct {
 	config *courier.Config
 
 	statusWriter *StatusWriter
-	dbLogWriter  *DBLogWriter     // unattached logs being written to the database
-	dyLogWriter  *DynamoLogWriter // all logs being written to dynamo
+	dynamoWriter *DynamoWriter // all logs being written to dynamo
 	writerWG     *sync.WaitGroup
 
-	db     *sqlx.DB
-	rp     *redis.Pool
-	dynamo *dynamo.Service
-	s3     *s3x.Service
-	cw     *cwatch.Service
+	db           *sqlx.DB
+	rp           *redis.Pool
+	dynamo       *dynamo.Table[DynamoKey, DynamoItem]
+	s3           *s3x.Service
+	cw           *cwatch.Service
+	systemUserID UserID
 
 	channelsByUUID *cache.Local[courier.ChannelUUID, *Channel]
 	channelsByAddr *cache.Local[courier.ChannelAddress, *Channel]
@@ -74,18 +74,18 @@ type backend struct {
 	httpClientInsecure *http.Client
 	httpAccess         *httpx.AccessConfig
 
-	mediaCache   *redisx.IntervalHash
+	mediaCache   *vkutil.IntervalHash
 	mediaMutexes syncx.HashMutex
 
 	// tracking of recent messages received to avoid creating duplicates
-	receivedExternalIDs *redisx.IntervalHash // using external id
-	receivedMsgs        *redisx.IntervalHash // using content hash
+	receivedExternalIDs *vkutil.IntervalHash // using external id
+	receivedMsgs        *vkutil.IntervalHash // using content hash
 
 	// tracking of sent message ids to avoid dupe sends
-	sentIDs *redisx.IntervalSet
+	sentIDs *vkutil.IntervalSet
 
 	// tracking of external ids of messages we've sent in case we need one before its status update has been written
-	sentExternalIDs *redisx.IntervalHash
+	sentExternalIDs *vkutil.IntervalHash
 
 	stats *StatsCollector
 
@@ -122,13 +122,13 @@ func newBackend(cfg *courier.Config) courier.Backend {
 
 		writerWG: &sync.WaitGroup{},
 
-		mediaCache:   redisx.NewIntervalHash("media-lookups", time.Hour*24, 2),
+		mediaCache:   vkutil.NewIntervalHash("media-lookups", time.Hour*24, 2),
 		mediaMutexes: *syncx.NewHashMutex(8),
 
-		receivedMsgs:        redisx.NewIntervalHash("seen-msgs", time.Second*2, 2),        // 2 - 4 seconds
-		receivedExternalIDs: redisx.NewIntervalHash("seen-external-ids", time.Hour*24, 2), // 24 - 48 hours
-		sentIDs:             redisx.NewIntervalSet("sent-ids", time.Hour, 2),              // 1 - 2 hours
-		sentExternalIDs:     redisx.NewIntervalHash("sent-external-ids", time.Hour, 2),    // 1 - 2 hours
+		receivedMsgs:        vkutil.NewIntervalHash("seen-msgs", time.Second*2, 2),        // 2 - 4 seconds
+		receivedExternalIDs: vkutil.NewIntervalHash("seen-external-ids", time.Hour*24, 2), // 24 - 48 hours
+		sentIDs:             vkutil.NewIntervalSet("sent-ids", time.Hour, 2),              // 1 - 2 hours
+		sentExternalIDs:     vkutil.NewIntervalHash("sent-external-ids", time.Hour, 2),    // 1 - 2 hours
 
 		stats: NewStatsCollector(),
 	}
@@ -161,11 +161,11 @@ func (b *backend) Start() error {
 		log.Info("db ok")
 	}
 
-	b.rp, err = redisx.NewPool(b.config.Redis, redisx.WithMaxActive(b.config.MaxWorkers*2))
+	b.rp, err = vkutil.NewPool(b.config.Valkey, vkutil.WithMaxActive(b.config.MaxWorkers*2))
 	if err != nil {
-		log.Error("redis not reachable", "error", err)
+		log.Error("valkey not reachable", "error", err)
 	} else {
-		log.Info("redis ok")
+		log.Info("valkey ok")
 	}
 
 	// start our dethrottler if we are going to be doing some sending
@@ -173,11 +173,13 @@ func (b *backend) Start() error {
 		queue.StartDethrottler(b.rp, b.stopChan, b.waitGroup, msgQueueName)
 	}
 
-	// setup DynamoDB
-	b.dynamo, err = dynamo.NewService(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.DynamoAWSRegion, b.config.DynamoEndpoint, b.config.DynamoTablePrefix)
+	// setup DynamoDB main table
+	dc, err := dynamo.NewClient(b.config.AWSAccessKeyID, b.config.AWSSecretAccessKey, b.config.DynamoAWSRegion, b.config.DynamoEndpoint)
 	if err != nil {
 		return err
 	}
+	b.dynamo = dynamo.NewTable[DynamoKey, DynamoItem](dc, b.config.DynamoTablePrefix+"Main")
+
 	if err := b.dynamo.Test(ctx); err != nil {
 		log.Error("dynamodb not reachable", "error", err)
 	} else {
@@ -226,11 +228,14 @@ func (b *backend) Start() error {
 	b.statusWriter = NewStatusWriter(b, b.config.SpoolDir, b.writerWG)
 	b.statusWriter.Start()
 
-	b.dbLogWriter = NewDBLogWriter(b.db, b.writerWG)
-	b.dbLogWriter.Start()
+	b.dynamoWriter = NewDynamoWriter(b.dynamo, b.writerWG)
+	b.dynamoWriter.Start()
 
-	b.dyLogWriter = NewDynamoLogWriter(b.dynamo, b.writerWG)
-	b.dyLogWriter.Start()
+	// store the system user id
+	b.systemUserID, err = getSystemUserID(ctx, b.db)
+	if err != nil {
+		return err
+	}
 
 	// register and start our spool flushers
 	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "msgs"), b.flushMsgFile)
@@ -294,11 +299,8 @@ func (b *backend) Cleanup() error {
 	if b.statusWriter != nil {
 		b.statusWriter.Stop()
 	}
-	if b.dbLogWriter != nil {
-		b.dbLogWriter.Stop()
-	}
-	if b.dyLogWriter != nil {
-		b.dyLogWriter.Stop()
+	if b.dynamoWriter != nil {
+		b.dynamoWriter.Stop()
 	}
 
 	// wait for them to flush fully
@@ -346,9 +348,9 @@ func (b *backend) GetChannelByAddress(ctx context.Context, typ courier.ChannelTy
 }
 
 // GetContact returns the contact for the passed in channel and URN
-func (b *backend) GetContact(ctx context.Context, c courier.Channel, urn urns.URN, authTokens map[string]string, name string, clog *courier.ChannelLog) (courier.Contact, error) {
+func (b *backend) GetContact(ctx context.Context, c courier.Channel, urn urns.URN, authTokens map[string]string, name string, allowCreate bool, clog *courier.ChannelLog) (courier.Contact, error) {
 	dbChannel := c.(*Channel)
-	return contactForURN(ctx, b, dbChannel.OrgID_, dbChannel, urn, authTokens, name, clog)
+	return contactForURN(ctx, b, dbChannel.OrgID_, dbChannel, urn, authTokens, name, allowCreate, clog)
 }
 
 // AddURNtoContact adds a URN to the passed in contact
@@ -396,7 +398,7 @@ func (b *backend) DeleteMsgByExternalID(ctx context.Context, channel courier.Cha
 		rc := b.rp.Get()
 		defer rc.Close()
 
-		if err := queueMsgDeleted(rc, ch, msgID, contactID); err != nil {
+		if err := queueMsgDeleted(ctx, rc, ch, msgID, contactID); err != nil {
 			return fmt.Errorf("error queuing message deleted task: %w", err)
 		}
 	}
@@ -405,7 +407,7 @@ func (b *backend) DeleteMsgByExternalID(ctx context.Context, channel courier.Cha
 }
 
 // NewIncomingMsg creates a new message from the given params
-func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text string, extID string, clog *courier.ChannelLog) courier.MsgIn {
+func (b *backend) NewIncomingMsg(ctx context.Context, channel courier.Channel, urn urns.URN, text string, extID string, clog *courier.ChannelLog) courier.MsgIn {
 	// strip out invalid UTF8 and NULL chars
 	urn = urns.URN(dbutil.ToValidUTF8(string(urn)))
 	text = dbutil.ToValidUTF8(text)
@@ -415,7 +417,7 @@ func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text str
 	msg.WithReceivedOn(time.Now().UTC())
 
 	// check if this message could be a duplicate and if so use the original's UUID
-	if prevUUID := b.checkMsgAlreadyReceived(msg); prevUUID != courier.NilMsgUUID {
+	if prevUUID := b.checkMsgAlreadyReceived(ctx, msg); prevUUID != courier.NilMsgUUID {
 		msg.UUID_ = prevUUID
 		msg.alreadyWritten = true
 	}
@@ -475,7 +477,7 @@ func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.MsgOut, error
 	dbMsg.workerToken = token
 
 	// clear out our seen incoming messages
-	b.clearMsgSeen(dbMsg)
+	b.clearMsgSeen(ctx, dbMsg)
 
 	return dbMsg, nil
 }
@@ -485,39 +487,41 @@ func (b *backend) WasMsgSent(ctx context.Context, id courier.MsgID) (bool, error
 	rc := b.rp.Get()
 	defer rc.Close()
 
-	return b.sentIDs.IsMember(rc, id.String())
+	return b.sentIDs.IsMember(ctx, rc, id.String())
 }
 
 func (b *backend) ClearMsgSent(ctx context.Context, id courier.MsgID) error {
 	rc := b.rp.Get()
 	defer rc.Close()
 
-	return b.sentIDs.Rem(rc, id.String())
+	return b.sentIDs.Rem(ctx, rc, id.String())
 }
 
 // OnSendComplete is called when the sender has finished trying to send a message
 func (b *backend) OnSendComplete(ctx context.Context, msg courier.MsgOut, status courier.StatusUpdate, clog *courier.ChannelLog) {
+	log := slog.With("channel", msg.Channel().UUID(), "msg", msg.UUID(), "clog", clog.UUID, "status", status)
+
 	rc := b.rp.Get()
 	defer rc.Close()
 
 	dbMsg := msg.(*Msg)
 
 	if err := queue.MarkComplete(rc, msgQueueName, dbMsg.workerToken); err != nil {
-		slog.Error("unable to mark queue task complete", "error", err)
+		log.Error("unable to mark queue task complete", "error", err)
 	}
 
 	// if message won't be retried, mark as sent to avoid dupe sends
 	if status.Status() != courier.MsgStatusErrored {
-		if err := b.sentIDs.Add(rc, msg.ID().String()); err != nil {
-			slog.Error("unable to mark message sent", "error", err)
+		if err := b.sentIDs.Add(ctx, rc, msg.ID().String()); err != nil {
+			log.Error("unable to mark message sent", "error", err)
 		}
 	}
 
 	// if message was successfully sent, and we have a session timeout, update it
 	wasSuccess := status.Status() == courier.MsgStatusWired || status.Status() == courier.MsgStatusSent || status.Status() == courier.MsgStatusDelivered || status.Status() == courier.MsgStatusRead
-	if wasSuccess && dbMsg.SessionWaitStartedOn_ != nil {
-		if err := updateSessionTimeout(ctx, b, dbMsg.SessionID_, *dbMsg.SessionWaitStartedOn_, dbMsg.SessionTimeout_); err != nil {
-			slog.Error("unable to update session timeout", "error", err, "session_id", dbMsg.SessionID_)
+	if wasSuccess && dbMsg.Session_ != nil && dbMsg.Session_.Timeout > 0 {
+		if err := b.insertTimeoutFire(ctx, dbMsg); err != nil {
+			log.Error("unable to update session timeout", "error", err, "session_uuid", dbMsg.Session_.UUID)
 		}
 	}
 
@@ -530,11 +534,19 @@ func (b *backend) OnReceiveComplete(ctx context.Context, ch courier.Channel, eve
 }
 
 // WriteMsg writes the passed in message to our store
-func (b *backend) WriteMsg(ctx context.Context, m courier.MsgIn, clog *courier.ChannelLog) error {
+func (b *backend) WriteMsg(ctx context.Context, msg courier.MsgIn, clog *courier.ChannelLog) error {
+	m := msg.(*Msg)
+
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
-	return writeMsg(timeout, b, m, clog)
+	if err := writeMsg(timeout, b, m, clog); err != nil {
+		return err
+	}
+
+	b.recordMsgReceived(ctx, m)
+
+	return nil
 }
 
 // NewStatusUpdateForID creates a new Status object for the given message id
@@ -571,7 +583,7 @@ func (b *backend) WriteStatusUpdate(ctx context.Context, status courier.StatusUp
 			rc := b.rp.Get()
 			defer rc.Close()
 
-			err := b.sentExternalIDs.Set(rc, fmt.Sprintf("%d|%s", su.ChannelID_, su.ExternalID_), fmt.Sprintf("%d", status.MsgID()))
+			err := b.sentExternalIDs.Set(ctx, rc, fmt.Sprintf("%d|%s", su.ChannelID_, su.ExternalID_), fmt.Sprintf("%d", status.MsgID()))
 			if err != nil {
 				log.Error("error recording external id", "error", err)
 			}
@@ -711,7 +723,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 	defer rc.Close()
 
 	var media *Media
-	mediaJSON, err := b.mediaCache.Get(rc, mediaUUID)
+	mediaJSON, err := b.mediaCache.Get(ctx, rc, mediaUUID)
 	if err != nil {
 		return nil, fmt.Errorf("error looking up cached media: %w", err)
 	}
@@ -725,7 +737,7 @@ func (b *backend) ResolveMedia(ctx context.Context, mediaUrl string) (courier.Me
 		}
 
 		// cache it for future requests
-		b.mediaCache.Set(rc, mediaUUID, string(jsonx.MustMarshal(media)))
+		b.mediaCache.Set(ctx, rc, mediaUUID, string(jsonx.MustMarshal(media)))
 	}
 
 	// if we found a media record but it doesn't match the URL, don't use it
@@ -821,8 +833,8 @@ func (b *backend) reportMetrics(ctx context.Context) (int, error) {
 	metrics = append(metrics,
 		cwatch.Datum("DBConnectionsInUse", float64(dbStats.InUse), cwtypes.StandardUnitCount, hostDim),
 		cwatch.Datum("DBConnectionWaitDuration", float64(dbWaitDurationInPeriod)/float64(time.Second), cwtypes.StandardUnitSeconds, hostDim),
-		cwatch.Datum("RedisConnectionsInUse", float64(redisStats.ActiveCount), cwtypes.StandardUnitCount, hostDim),
-		cwatch.Datum("RedisConnectionsWaitDuration", float64(redisWaitDurationInPeriod)/float64(time.Second), cwtypes.StandardUnitSeconds, hostDim),
+		cwatch.Datum("ValkeyConnectionsInUse", float64(redisStats.ActiveCount), cwtypes.StandardUnitCount, hostDim),
+		cwatch.Datum("ValkeyConnectionsWaitDuration", float64(redisWaitDurationInPeriod)/float64(time.Second), cwtypes.StandardUnitSeconds, hostDim),
 		cwatch.Datum("QueuedMsgs", float64(bulkSize), cwtypes.StandardUnitCount, cwatch.Dimension("QueueName", "bulk")),
 		cwatch.Datum("QueuedMsgs", float64(prioritySize), cwtypes.StandardUnitCount, cwatch.Dimension("QueueName", "priority")),
 	)

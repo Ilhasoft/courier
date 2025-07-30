@@ -19,6 +19,7 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
+	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/urns"
 )
 
@@ -84,7 +85,7 @@ func (h *handler) VerifyURL(ctx context.Context, channel courier.Channel, w http
 	ResponseText := "unknown request"
 	StatusCode := 400
 
-	if encoded == form.Signature {
+	if utils.SecretEqual(encoded, form.Signature) {
 		ResponseText = form.EchoStr
 		StatusCode = 200
 	}
@@ -145,7 +146,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	}
 
 	// create our message
-	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Content, payload.MsgID, clog).WithReceivedOn(date)
+	msg := h.Backend().NewIncomingMsg(ctx, channel, urn, payload.Content, payload.MsgID, clog).WithReceivedOn(date)
 	if payload.MsgType == "image" || payload.MsgType == "video" || payload.MsgType == "voice" {
 		mediaURL := buildMediaURL(payload.MediaID)
 		msg.WithAttachment(mediaURL)
@@ -283,7 +284,7 @@ func (h *handler) getAccessToken(channel courier.Channel, clog *courier.ChannelL
 
 	var token string
 	var err error
-	h.WithRedisConn(func(rc redis.Conn) {
+	h.WithValkeyConn(func(rc redis.Conn) {
 		token, err = redis.String(rc.Do("GET", tokenKey))
 	})
 
@@ -300,7 +301,7 @@ func (h *handler) getAccessToken(channel courier.Channel, clog *courier.ChannelL
 		return "", fmt.Errorf("error fetching new access token: %w", err)
 	}
 
-	h.WithRedisConn(func(rc redis.Conn) {
+	h.WithValkeyConn(func(rc redis.Conn) {
 		_, err = rc.Do("SET", tokenKey, token, "EX", int(expires/time.Second))
 	})
 
