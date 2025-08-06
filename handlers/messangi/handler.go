@@ -28,17 +28,38 @@ func newHandler() courier.ChannelHandler {
 }
 
 type moPayload struct {
-	Owner      string `json:"owner"`
-	Date       string `json:"date"`
-	ProcessID  string `json:"processId"`
-	Origin     string `json:"origin"`
-	ExternalID string `json:"externalId"`
-	Callback   string `json:"callback"`
-	Connection string `json:"connection"`
-	ID         string `json:"id"`
-	Text       string `json:"text"`
-	User       string `json:"user"`
-	ExtraInfo  any    `json:"extraInfo"`
+	Owner      string    `json:"owner"`
+	Date       string    `json:"date"`
+	ProcessID  int       `json:"processId"`
+	Origin     string    `json:"origin"`
+	ExternalID string    `json:"externalId"`
+	Callback   string    `json:"callback"`
+	Connection string    `json:"connection"`
+	ID         string    `json:"id"`
+	Text       string    `json:"text"`
+	User       string    `json:"user"`
+	ExtraInfo  ExtraInfo `json:"extraInfo"`
+}
+
+type ExtraInfo struct {
+	Type        string         `json:"type"`
+	Attachments []AttachmentMG `json:"attachments,omitempty"`
+	Contacts    []ContactInfo  `json:"contacts,omitempty"`
+}
+
+type AttachmentMG struct {
+	FileName string `json:"fileName"`
+	URL      string `json:"url"`
+	Caption  string `json:"caption,omitempty"`
+}
+
+type ContactInfo struct {
+	Profile Profile `json:"profile"`
+	WaID    string  `json:"wa_id"`
+}
+
+type Profile struct {
+	Name string `json:"name"`
 }
 
 // Initialize is called by the engine once everything is loaded
