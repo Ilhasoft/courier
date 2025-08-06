@@ -96,6 +96,11 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	// create our message
 	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Text, payload.ID, clog).WithReceivedOn(date)
 
+	// add contact name if available
+	if len(payload.ExtraInfo.Contacts) > 0 && payload.ExtraInfo.Contacts[0].Profile.Name != "" {
+		msg = msg.WithContactName(payload.ExtraInfo.Contacts[0].Profile.Name)
+	}
+
 	// and finally write our message
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
 }
