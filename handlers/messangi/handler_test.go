@@ -26,7 +26,7 @@ var testCases = []IncomingTestCase{
 	{
 		Label:                "Receive Valid",
 		URL:                  receiveURL,
-		Data:                 `{"owner":"empresa","date":"2025-05-23T14:30:00Z","processId":"abc123","origin":"12345","externalId":"campanha_001","callback":"https://suaapi.com/messangi/mo","connection":"SMS","id":"usuario_456","text":"Olá, quero participar","user":"+5588999999999","extraInfo":null}`,
+		Data:                 `{"owner":"empresa","date":"2025-05-23T14:30:00Z","processId":123,"origin":"12345","externalId":"campanha_001","callback":"https://suaapi.com/messangi/mo","connection":"SMS","id":"usuario_456","text":"Olá, quero participar","user":"+5588999999999","extraInfo":null}`,
 		ExpectedRespStatus:   200,
 		ExpectedBodyContains: "Message Accepted",
 		ExpectedMsgText:      Sp("Olá, quero participar"),
