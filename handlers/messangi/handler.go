@@ -28,17 +28,38 @@ func newHandler() courier.ChannelHandler {
 }
 
 type moPayload struct {
-	Owner      string `json:"owner"`
-	Date       string `json:"date"`
-	ProcessID  string `json:"processId"`
-	Origin     string `json:"origin"`
-	ExternalID string `json:"externalId"`
-	Callback   string `json:"callback"`
-	Connection string `json:"connection"`
-	ID         string `json:"id"`
-	Text       string `json:"text"`
-	User       string `json:"user"`
-	ExtraInfo  any    `json:"extraInfo"`
+	Owner      string    `json:"owner"`
+	Date       string    `json:"date"`
+	ProcessID  int       `json:"processId"`
+	Origin     string    `json:"origin"`
+	ExternalID string    `json:"externalId"`
+	Callback   string    `json:"callback"`
+	Connection string    `json:"connection"`
+	ID         string    `json:"id"`
+	Text       string    `json:"text"`
+	User       string    `json:"user"`
+	ExtraInfo  ExtraInfo `json:"extraInfo"`
+}
+
+type ExtraInfo struct {
+	Type        string         `json:"type"`
+	Attachments []AttachmentMG `json:"attachments,omitempty"`
+	Contacts    []ContactInfo  `json:"contacts,omitempty"`
+}
+
+type AttachmentMG struct {
+	FileName string `json:"fileName"`
+	URL      string `json:"url"`
+	Caption  string `json:"caption,omitempty"`
+}
+
+type ContactInfo struct {
+	Profile Profile `json:"profile"`
+	WaID    string  `json:"wa_id"`
+}
+
+type Profile struct {
+	Name string `json:"name"`
 }
 
 // Initialize is called by the engine once everything is loaded
@@ -74,6 +95,11 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 
 	// create our message
 	msg := h.Backend().NewIncomingMsg(channel, urn, payload.Text, payload.ID, clog).WithReceivedOn(date)
+
+	// add contact name if available
+	if len(payload.ExtraInfo.Contacts) > 0 && payload.ExtraInfo.Contacts[0].Profile.Name != "" {
+		msg = msg.WithContactName(payload.ExtraInfo.Contacts[0].Profile.Name)
+	}
 
 	// and finally write our message
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.MsgIn{msg}, w, r, clog)
